@@ -186,6 +186,13 @@ if len(datasets) > 1:
         file_name=f"Transaksi_R-5401_semua_{datetime.now():%Y%m%d}.zip",
         mime="application/zip",
     )
+elif len(uploaded) > 1:
+    st.divider()
+    st.info(
+        "📦 Tidak ada file gabungan untuk diunduh — semua file yang diupload "
+        "adalah laporan duplikat (kode & tanggal sama), jadi hanya dianggap 1 "
+        "laporan unik. Unduh lewat tombol per-file di atas."
+    )
 
 st.divider()
 st.caption(
