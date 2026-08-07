@@ -1,10 +1,13 @@
 # Konverter Laporan R-5401 → Excel
 
-Aplikasi Streamlit untuk mengubah file laporan transaksi harian bank (R-5401,
-format teks lebar-tetap) menjadi file Excel rapi berisi sheet **Data Transaksi**
-dan **Ringkasan** (KPI, rekap per lokasi/channel, rekap per jam). Mendukung
-upload banyak file sekaligus, validasi otomatis terhadap total footer laporan,
-dan unduh gabungan.
+Aplikasi web untuk mengubah file laporan transaksi harian bank (R-5401, format
+teks lebar-tetap) menjadi file Excel rapi berisi sheet **Data Transaksi** dan
+**Ringkasan** (KPI, rekap per lokasi/channel, rekap per jam). Mendukung upload
+banyak file sekaligus, validasi otomatis terhadap total footer laporan, dan
+unduh gabungan.
+
+Dibangun **ringan** dengan Flask + openpyxl (tanpa numpy/pandas/pyarrow), memakai
+HTTP request/response biasa — hemat memori dan stabil di container kecil.
 
 ## Fitur
 - Upload 1 atau banyak file `.txt` sekaligus.
@@ -16,47 +19,53 @@ dan unduh gabungan.
 ## Menjalankan lokal
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+
+# cara cepat (server bawaan Flask, untuk development):
+python app.py
+# atau persis seperti produksi:
+gunicorn app:app --workers 1 --threads 4 --bind 0.0.0.0:8501
 ```
 Buka http://localhost:8501
 
-## Deploy ke Railway
+## Struktur file
+```
+app.py            # aplikasi Flask (routing, upload, render hasil, endpoint unduh)
+parser.py         # parsing R-5401 + pembuatan Excel (openpyxl)
+requirements.txt  # Flask, openpyxl, gunicorn
+Procfile          # start command untuk platform berbasis Procfile
+railway.json      # start command untuk Railway
+runtime.txt       # versi Python
+```
 
-### Struktur file (wajib ada semua)
-```
-app.py
-parser.py
-requirements.txt
-Procfile
-railway.json
-runtime.txt
-.streamlit/config.toml
-```
+## Deploy ke Railway
 
 ### Metode A — via GitHub (paling mudah)
 1. Push folder ini ke sebuah repo GitHub.
 2. Buka https://railway.app → **New Project** → **Deploy from GitHub repo** → pilih repo.
-3. Railway otomatis mendeteksi Python (Nixpacks) dan menjalankan start command dari
-   `Procfile` / `railway.json`:
-   `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`
-4. Setelah build selesai, buka tab **Settings → Networking → Generate Domain**
+3. Railway mendeteksi Python (Nixpacks) dan menjalankan start command dari
+   `railway.json` / `Procfile`:
+   `gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT`
+4. Setelah build selesai, buka **Settings → Networking → Generate Domain**
    untuk mendapatkan URL publik.
 
 ### Metode B — via Railway CLI
 ```bash
 npm i -g @railway/cli
 railway login
-railway init          # buat project baru
-railway up            # deploy folder ini
-railway domain        # generate URL publik
+railway init
+railway up
+railway domain
 ```
 
 ### Catatan penting
-- **`$PORT`**: Railway memberikan port lewat env var `$PORT`. Start command sudah
-  memakainya — jangan hard-code port.
-- **`--server.address 0.0.0.0`**: wajib agar app bisa diakses dari luar container.
+- **`$PORT`**: Railway memberikan port lewat env var `$PORT`; start command sudah memakainya.
+- **`--workers 1 --threads 4`**: 1 worker menjaga pemakaian memori rendah; beberapa
+  thread cukup untuk melayani permintaan bersamaan. Hasil parsing disimpan sementara
+  di memori proses (kedaluwarsa 30 menit), jadi tetap 1 worker agar link unduh selalu
+  ketemu datanya.
+- **Batas upload**: total 40 MB per sekali upload (diatur di `app.py` via
+  `MAX_CONTENT_LENGTH`).
 - Tidak perlu env var tambahan untuk fungsi dasar.
-- Batas ukuran upload diatur di `.streamlit/config.toml` (`maxUploadSize`, default 20 MB).
 
 ## Catatan data
 Nama pelanggan & keterangan pada laporan sumber terpotong (field lebar-tetap

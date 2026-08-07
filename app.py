@@ -1,91 +1,118 @@
 """
-Konverter Laporan R-5401 (Bank) -> Excel
-Aplikasi Streamlit: upload file .txt laporan harian, validasi, unduh Excel.
+Konverter Laporan R-5401 (Bank) -> Excel — versi ringan (Flask).
+
+Upload file .txt laporan harian, validasi terhadap footer, unduh Excel rapi.
+Tanpa Streamlit / numpy / pandas / pyarrow — hanya Flask + openpyxl, memakai
+HTTP request/response biasa (tanpa WebSocket) supaya ringan & stabil di Railway.
 """
 import io
+import time
 import zipfile
+import secrets
+import threading
 from datetime import datetime
 
-import pandas as pd
-import streamlit as st
+from flask import (
+    Flask, request, render_template_string, send_file, abort, redirect, url_for,
+)
 
 from parser import parse_report, build_workbook, build_combined_workbook
 
-st.set_page_config(page_title="Konverter R-5401 → Excel", page_icon="📊", layout="wide")
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
+PREVIEW_LIMIT = 100                                    # baris maksimum di tabel preview
 
-# ---------- header ----------
-st.title("📊 Konverter Laporan R-5401 → Excel")
-st.caption(
-    "Upload file laporan transaksi harian (.txt format lebar-tetap dari bank), "
-    "aplikasi akan mem-parsing, memvalidasi terhadap total footer, dan menyiapkan "
-    "file Excel rapi (Data + Ringkasan) untuk diunduh."
-)
+# ---- penyimpanan hasil sementara (in-memory, dibatasi TTL & jumlah) ----
+# Menyimpan byte Excel hasil parsing supaya link unduh tidak perlu mem-parsing ulang.
+# Dibatasi agar memori tidak menumpuk di container kecil.
+_STORE = {}
+_LOCK = threading.Lock()
+_TTL = 1800          # hasil kedaluwarsa setelah 30 menit
+_MAX_TOKENS = 20     # maksimum sesi hasil yang disimpan bersamaan
 
 
+def _evict(now):
+    dead = [k for k, v in _STORE.items() if now - v["ts"] > _TTL]
+    for k in dead:
+        _STORE.pop(k, None)
+    if len(_STORE) > _MAX_TOKENS:
+        oldest = sorted(_STORE, key=lambda k: _STORE[k]["ts"])[: len(_STORE) - _MAX_TOKENS]
+        for k in oldest:
+            _STORE.pop(k, None)
+
+
+def _store(payload):
+    token = secrets.token_urlsafe(16)
+    with _LOCK:
+        _evict(time.time())
+        _STORE[token] = {"ts": time.time(), **payload}
+    return token
+
+
+def _get(token):
+    with _LOCK:
+        entry = _STORE.get(token)
+        if entry and time.time() - entry["ts"] <= _TTL:
+            return entry
+    return None
+
+
+# ---------- helper ----------
 def rupiah(n):
     return "Rp " + f"{int(round(n)):,}".replace(",", ".")
+
+
+def ribuan(n):
+    return f"{int(n):,}".replace(",", ".")
 
 
 def wb_to_bytes(wb):
     buf = io.BytesIO()
     wb.save(buf)
-    buf.seek(0)
     return buf.getvalue()
 
 
-_CACHE_TTL = 1800   # 30 menit - cukup untuk 1 sesi kerja, tidak menumpuk lintas hari
-_CACHE_MAX = 30     # batas jumlah file unik yang di-cache bersamaan (semua sesi/user)
+def xlsx_name(meta):
+    kode = meta["kode"] or "NA"
+    tgl = (meta["tanggal_label"] or "").replace("/", "")
+    return f"Transaksi_R-5401_{kode}_{tgl}.xlsx"
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
-def parse_cached(file_bytes):
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _decode(raw):
     try:
-        text = file_bytes.decode("utf-8")
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
-        text = file_bytes.decode("latin-1", errors="replace")
-    return parse_report(text)
+        return raw.decode("latin-1", errors="replace")
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
-def build_workbook_bytes(rows, meta):
-    return wb_to_bytes(build_workbook(rows, meta))
+# ---------- routes ----------
+@app.route("/", methods=["GET"])
+def index():
+    return render_template_string(PAGE, results=None, token=None, combined=None,
+                                  has_zip=False, summary=None, all_dup=False)
 
 
-@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
-def build_combined_bytes(datasets):
-    return wb_to_bytes(build_combined_workbook(datasets))
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        return redirect(url_for("index"))
 
+    results = []       # data untuk ditampilkan per file
+    per_file = []      # (download_name, xlsx_bytes) atau None, sejajar index dengan results
+    built = []         # (download_name, xlsx_bytes) hanya untuk file unik -> isi .zip
+    datasets = []      # (meta, rows) hanya untuk file unik -> Excel gabungan
+    seen = set()       # (kode, tanggal) untuk deteksi duplikat
 
-uploaded = st.file_uploader(
-    "Pilih satu atau beberapa file laporan (.txt)",
-    type=["txt"],
-    accept_multiple_files=True,
-    help="Bisa upload banyak file sekaligus — tiap tanggal / kode perusahaan.",
-)
-
-if not uploaded:
-    st.info("⬆️ Silakan upload minimal satu file .txt untuk mulai.")
-    st.stop()
-
-datasets = []           # (meta, rows) untuk file valid & unik
-built = []              # (fname, wb_bytes) untuk file valid & unik, dipakai ulang saat bangun .zip
-seen = set()            # (kode, tanggal) untuk deteksi duplikat
-
-st.divider()
-
-for i, uf in enumerate(uploaded):
-    meta, rows = parse_cached(uf.getvalue())
-
-    with st.container(border=True):
-        c_title, c_badge = st.columns([4, 1])
-        c_title.subheader(f"📄 {uf.name}")
+    for f in files:
+        meta, rows = parse_report(_decode(f.read()))
 
         if not rows:
-            c_badge.error("Gagal")
-            st.warning(
-                "Tidak ada baris transaksi terbaca. Pastikan ini file laporan R-5401 "
-                "dengan format lebar-tetap yang benar."
-            )
+            results.append({"name": f.filename, "ok_parse": False})
+            per_file.append(None)
             continue
 
         parsed_total = sum(r[3] for r in rows)
@@ -96,110 +123,280 @@ for i, uf in enumerate(uploaded):
         is_dup = key in seen
         seen.add(key)
 
-        # --- validasi ---
         total_ok = ft is not None and abs(parsed_total - ft) < 0.01
         count_ok = fc is not None and parsed_count == fc
         if total_ok and count_ok:
-            c_badge.success("✓ Valid")
+            status = "valid"
         elif ft is None and fc is None:
-            c_badge.warning("Tanpa footer")
+            status = "nofooter"
         else:
-            c_badge.error("Selisih!")
+            status = "mismatch"
 
-        # --- metadata + metrics ---
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Kode Perusahaan", meta["kode"] or "—")
-        m2.metric("Tanggal", meta["tanggal_label"] or "—")
-        m3.metric("Jumlah Transaksi", f"{parsed_count:,}".replace(",", "."))
-        m4.metric("Total Nilai", rupiah(parsed_total))
+        dname = xlsx_name(meta)
+        xbytes = wb_to_bytes(build_workbook(rows, meta))
+        per_file.append((dname, xbytes))
 
-        if meta["nama_pt"]:
-            st.caption(f"**{meta['nama_pt']}**  •  {meta['cabang']}")
+        preview = [
+            [r[0], r[1], r[2], ribuan(round(r[3])),
+             r[4].strftime("%d/%m/%Y"), r[5].strftime("%H:%M:%S"),
+             f"{r[6]:02d}", r[7], r[8], r[9]]
+            for r in rows[:PREVIEW_LIMIT]
+        ]
 
-        # --- validasi detail ---
-        if not total_ok and ft is not None:
-            st.error(
-                f"⚠️ Total hasil parsing ({rupiah(parsed_total)}) TIDAK cocok dengan "
-                f"total footer laporan ({rupiah(ft)}). Selisih {rupiah(abs(parsed_total-ft))}."
-            )
-        if not count_ok and fc is not None:
-            st.error(
-                f"⚠️ Jumlah transaksi hasil parsing ({parsed_count}) tidak cocok dengan "
-                f"footer ({fc})."
-            )
-        if is_dup:
-            st.warning(
-                "🔁 File ini duplikat (kode & tanggal sama dengan file lain). "
-                "Tetap bisa diunduh, tapi **tidak** ikut dalam file gabungan agar total tidak dobel."
-            )
-
-        # --- preview tabel ---
-        df = pd.DataFrame(
-            rows,
-            columns=["No.", "No. Pelanggan/TXN", "Nama", "Nilai", "Tgl",
-                     "Waktu", "Jam", "Lokasi", "Keterangan 1", "Keterangan 2"],
-        )
-        with st.expander(f"👁️ Lihat data ({parsed_count} baris)"):
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # --- tombol unduh per file ---
-        wb_bytes = build_workbook_bytes(rows, meta)
-        fname = f"Transaksi_R-5401_{meta['kode'] or 'NA'}_{(meta['tanggal_label'] or '').replace('/','')}.xlsx"
-        st.download_button(
-            "⬇️ Unduh Excel file ini",
-            data=wb_bytes,
-            file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_{i}_{uf.name}",
-        )
+        results.append({
+            "name": f.filename, "ok_parse": True, "status": status, "is_dup": is_dup,
+            "meta": meta, "parsed_count": parsed_count,
+            "total_str": rupiah(parsed_total), "count_str": ribuan(parsed_count),
+            "ft_str": rupiah(ft) if ft is not None else None,
+            "fc": fc,
+            "selisih_str": rupiah(abs(parsed_total - ft)) if ft is not None else None,
+            "total_ok": total_ok, "count_ok": count_ok,
+            "preview": preview, "preview_more": max(0, parsed_count - len(preview)),
+            "idx": len(per_file) - 1,
+        })
 
         if not is_dup:
             datasets.append((meta, rows))
-            built.append((fname, wb_bytes))
+            built.append((dname, xbytes))
 
-# ---------- gabungan ----------
-if len(datasets) > 1:
-    st.divider()
-    st.subheader("📦 Unduh Gabungan")
-    grand = sum(sum(r[3] for r in rows) for _, rows in datasets)
-    total_txn = sum(len(rows) for _, rows in datasets)
-    st.write(
-        f"**{len(datasets)} laporan** unik  •  **{total_txn:,}** transaksi  •  "
-        f"total **{rupiah(grand)}**".replace(",", ".")
+    # ---- gabungan ----
+    combined = None
+    zip_item = None
+    summary = None
+    if len(datasets) > 1:
+        combined = (f"Transaksi_R-5401_GABUNGAN_{datetime.now():%Y%m%d}.xlsx",
+                    wb_to_bytes(build_combined_workbook(datasets)))
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in built:
+                zf.writestr(name, data)
+        zip_item = (f"Transaksi_R-5401_semua_{datetime.now():%Y%m%d}.zip", zbuf.getvalue())
+        grand = sum(sum(r[3] for r in rows) for _, rows in datasets)
+        total_txn = sum(len(rows) for _, rows in datasets)
+        summary = {"n": len(datasets), "txn": ribuan(total_txn), "total": rupiah(grand)}
+
+    all_dup = len(files) > 1 and len(datasets) <= 1
+
+    token = _store({"per_file": per_file, "combined": combined, "zip": zip_item})
+    return render_template_string(
+        PAGE, results=results, token=token,
+        combined=combined[0] if combined else None,
+        has_zip=zip_item is not None, summary=summary, all_dup=all_dup,
     )
 
-    cga, cgb = st.columns(2)
 
-    # 1 workbook gabungan
-    cga.download_button(
-        "⬇️ Unduh 1 Excel gabungan (Data + Rekap Harian)",
-        data=build_combined_bytes(datasets),
-        file_name=f"Transaksi_R-5401_GABUNGAN_{datetime.now():%Y%m%d}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+def _send(item):
+    if not item:
+        abort(404)
+    name, data = item
+    mime = XLSX_MIME if name.endswith(".xlsx") else "application/zip"
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name, mimetype=mime)
 
-    # zip semua file terpisah (pakai workbook yang sudah dibangun di atas, tidak dibangun ulang)
-    zbuf = io.BytesIO()
-    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, wb_bytes in built:
-            zf.writestr(name, wb_bytes)
-    zbuf.seek(0)
-    cgb.download_button(
-        "⬇️ Unduh semua (.zip berisi file terpisah)",
-        data=zbuf.getvalue(),
-        file_name=f"Transaksi_R-5401_semua_{datetime.now():%Y%m%d}.zip",
-        mime="application/zip",
-    )
-elif len(uploaded) > 1:
-    st.divider()
-    st.info(
-        "📦 Tidak ada file gabungan untuk diunduh — semua file yang diupload "
-        "adalah laporan duplikat (kode & tanggal sama), jadi hanya dianggap 1 "
-        "laporan unik. Unduh lewat tombol per-file di atas."
-    )
 
-st.divider()
-st.caption(
-    "Catatan: Nama pelanggan & keterangan pada laporan sumber terpotong "
-    "(field lebar-tetap ±16 karakter). Nilai, tanggal, waktu, dan lokasi akurat 100%."
-)
+@app.route("/dl/<token>/f/<int:idx>")
+def dl_file(token, idx):
+    entry = _get(token)
+    if not entry:
+        abort(404)
+    per_file = entry["per_file"]
+    return _send(per_file[idx] if 0 <= idx < len(per_file) else None)
+
+
+@app.route("/dl/<token>/combined")
+def dl_combined(token):
+    entry = _get(token)
+    return _send(entry["combined"] if entry else None)
+
+
+@app.route("/dl/<token>/zip")
+def dl_zip(token):
+    entry = _get(token)
+    return _send(entry["zip"] if entry else None)
+
+
+@app.route("/health")
+def health():
+    return "ok", 200
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    return ("File terlalu besar. Batas total 1x upload adalah 40 MB. "
+            "Coba upload lebih sedikit file sekaligus."), 413
+
+
+# ---------- template ----------
+PAGE = """<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Konverter Laporan R-5401 &rarr; Excel</title>
+<style>
+  :root { --teal:#1F4E5F; --teal2:#2b6b80; --line:#e3e8ea; --band:#f2f7f9;
+          --ok:#1a7f37; --okbg:#e8f5ec; --warn:#8a6d00; --warnbg:#fff7e0;
+          --err:#b3261e; --errbg:#fdecea; --info:#0b5a75; --infobg:#e6f2f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:#1a2327; background:#f7f9fa; line-height:1.5; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:1.7rem; margin:0 0 6px; color:var(--teal); }
+  .sub { color:#5c6b70; margin:0 0 22px; font-size:.95rem; }
+  form.up { background:#fff; border:1px solid var(--line); border-radius:12px; padding:20px; }
+  label.lbl { font-weight:600; display:block; margin-bottom:10px; }
+  input[type=file] { display:block; width:100%; padding:14px; border:2px dashed #c4d2d7;
+                     border-radius:10px; background:#fafcfd; cursor:pointer; }
+  .btn { display:inline-block; border:0; border-radius:9px; padding:11px 18px; font-size:.95rem;
+         font-weight:600; cursor:pointer; text-decoration:none; }
+  .btn.primary { background:var(--teal); color:#fff; margin-top:14px; }
+  .btn.primary:hover { background:var(--teal2); }
+  .btn.dl { background:var(--teal); color:#fff; margin-top:12px; }
+  .btn.dl:hover { background:var(--teal2); }
+  .btn.ghost { background:#eef3f5; color:var(--teal); }
+  .card { background:#fff; border:1px solid var(--line); border-left:5px solid #ccc;
+          border-radius:12px; padding:18px 20px; margin-top:18px; }
+  .card.valid { border-left-color:var(--ok); }
+  .card.mismatch, .card.fail { border-left-color:var(--err); }
+  .card.nofooter { border-left-color:var(--warn); }
+  .chead { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .chead h2 { font-size:1.1rem; margin:0; word-break:break-all; }
+  .badge { flex:none; font-size:.8rem; font-weight:700; padding:5px 11px; border-radius:999px; white-space:nowrap; }
+  .badge.valid { background:var(--okbg); color:var(--ok); }
+  .badge.mismatch, .badge.fail { background:var(--errbg); color:var(--err); }
+  .badge.nofooter { background:var(--warnbg); color:var(--warn); }
+  .badge.dup { background:var(--warnbg); color:var(--warn); }
+  .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:16px 0 4px; }
+  @media (max-width:640px){ .metrics{ grid-template-columns:repeat(2,1fr); } }
+  .metric .k { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:#6b7a80; }
+  .metric .v { font-size:1.15rem; font-weight:700; color:#16232a; }
+  .pt { color:#5c6b70; font-size:.9rem; margin:6px 0 0; }
+  .alert { border-radius:9px; padding:10px 13px; margin-top:12px; font-size:.9rem; }
+  .alert.err { background:var(--errbg); color:var(--err); }
+  .alert.warn { background:var(--warnbg); color:var(--warn); }
+  .alert.info { background:var(--infobg); color:var(--info); }
+  details { margin-top:14px; }
+  summary { cursor:pointer; font-weight:600; color:var(--teal); }
+  .tblwrap { overflow-x:auto; margin-top:12px; border:1px solid var(--line); border-radius:8px; }
+  table { border-collapse:collapse; width:100%; font-size:.82rem; white-space:nowrap; }
+  th,td { padding:7px 10px; border-bottom:1px solid var(--line); text-align:left; }
+  th { background:var(--teal); color:#fff; position:sticky; top:0; }
+  tbody tr:nth-child(even){ background:var(--band); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .more { color:#6b7a80; font-size:.8rem; padding:8px 10px; }
+  .combined { background:#fff; border:1px solid var(--line); border-radius:12px; padding:20px; margin-top:22px; }
+  .combined h2 { margin:0 0 6px; color:var(--teal); font-size:1.2rem; }
+  .cbtns { display:flex; flex-wrap:wrap; gap:12px; margin-top:6px; }
+  .foot { color:#7c8a90; font-size:.82rem; margin-top:30px; }
+  hr.sep { border:0; border-top:1px solid var(--line); margin:26px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
+  <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
+     Aplikasi akan mem-parsing, memvalidasi terhadap total footer, dan menyiapkan file
+     Excel rapi (Data + Ringkasan) untuk diunduh.</p>
+
+  <form class="up" method="post" action="{{ url_for('analyze') }}" enctype="multipart/form-data">
+    <label class="lbl" for="files">Pilih satu atau beberapa file laporan (.txt)</label>
+    <input id="files" type="file" name="files" accept=".txt" multiple required>
+    <button class="btn primary" type="submit">&#9889; Proses &amp; Validasi</button>
+  </form>
+
+  {% if results is not none %}
+    {% if results|length == 0 %}
+      <div class="alert info" style="margin-top:22px;">Tidak ada file yang bisa diproses.</div>
+    {% endif %}
+
+    {% for r in results %}
+      {% if not r.ok_parse %}
+        <div class="card fail">
+          <div class="chead"><h2>&#128196; {{ r.name }}</h2><span class="badge fail">Gagal</span></div>
+          <div class="alert warn">Tidak ada baris transaksi terbaca. Pastikan ini file laporan
+             R-5401 dengan format lebar-tetap yang benar.</div>
+        </div>
+      {% else %}
+        <div class="card {{ r.status }}">
+          <div class="chead">
+            <h2>&#128196; {{ r.name }}</h2>
+            {% if r.status == 'valid' %}<span class="badge valid">&#10003; Valid</span>
+            {% elif r.status == 'nofooter' %}<span class="badge nofooter">Tanpa footer</span>
+            {% else %}<span class="badge mismatch">Selisih!</span>{% endif %}
+          </div>
+
+          <div class="metrics">
+            <div class="metric"><div class="k">Kode Perusahaan</div><div class="v">{{ r.meta.kode or '—' }}</div></div>
+            <div class="metric"><div class="k">Tanggal</div><div class="v">{{ r.meta.tanggal_label or '—' }}</div></div>
+            <div class="metric"><div class="k">Jumlah Transaksi</div><div class="v">{{ r.count_str }}</div></div>
+            <div class="metric"><div class="k">Total Nilai</div><div class="v">{{ r.total_str }}</div></div>
+          </div>
+
+          {% if r.meta.nama_pt %}<p class="pt"><strong>{{ r.meta.nama_pt }}</strong> &bull; {{ r.meta.cabang }}</p>{% endif %}
+
+          {% if not r.total_ok and r.ft_str %}
+            <div class="alert err">&#9888; Total hasil parsing ({{ r.total_str }}) TIDAK cocok dengan
+               total footer laporan ({{ r.ft_str }}). Selisih {{ r.selisih_str }}.</div>
+          {% endif %}
+          {% if not r.count_ok and r.fc is not none %}
+            <div class="alert err">&#9888; Jumlah transaksi hasil parsing ({{ r.parsed_count }}) tidak
+               cocok dengan footer ({{ r.fc }}).</div>
+          {% endif %}
+          {% if r.is_dup %}
+            <div class="alert warn">&#128257; File ini duplikat (kode &amp; tanggal sama dengan file lain).
+               Tetap bisa diunduh, tapi <strong>tidak</strong> ikut dalam file gabungan agar total tidak dobel.</div>
+          {% endif %}
+
+          <details>
+            <summary>&#128065; Lihat data ({{ r.count_str }} baris)</summary>
+            <div class="tblwrap">
+              <table>
+                <thead><tr>
+                  <th>No.</th><th>No. Pelanggan/TXN</th><th>Nama</th><th>Nilai</th><th>Tgl</th>
+                  <th>Waktu</th><th>Jam</th><th>Lokasi</th><th>Keterangan 1</th><th>Keterangan 2</th>
+                </tr></thead>
+                <tbody>
+                  {% for row in r.preview %}
+                    <tr>
+                      <td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td>
+                      <td class="num">{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td>
+                      <td>{{ row[6] }}</td><td>{{ row[7] }}</td><td>{{ row[8] }}</td><td>{{ row[9] }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% if r.preview_more %}<div class="more">… {{ r.preview_more }} baris lainnya (lengkap di file Excel).</div>{% endif %}
+            </div>
+          </details>
+
+          <a class="btn dl" href="{{ url_for('dl_file', token=token, idx=r.idx) }}">&#11015; Unduh Excel file ini</a>
+        </div>
+      {% endif %}
+    {% endfor %}
+
+    {% if summary %}
+      <div class="combined">
+        <h2>&#128230; Unduh Gabungan</h2>
+        <p class="sub" style="margin:0 0 10px;"><strong>{{ summary.n }} laporan</strong> unik &bull;
+           <strong>{{ summary.txn }}</strong> transaksi &bull; total <strong>{{ summary.total }}</strong></p>
+        <div class="cbtns">
+          <a class="btn dl" href="{{ url_for('dl_combined', token=token) }}">&#11015; Unduh 1 Excel gabungan (Data + Rekap Harian)</a>
+          {% if has_zip %}<a class="btn ghost" href="{{ url_for('dl_zip', token=token) }}">&#11015; Unduh semua (.zip berisi file terpisah)</a>{% endif %}
+        </div>
+      </div>
+    {% elif all_dup %}
+      <div class="alert info" style="margin-top:22px;">&#128230; Tidak ada file gabungan untuk diunduh —
+         semua file yang diupload adalah laporan duplikat (kode &amp; tanggal sama), jadi hanya dianggap
+         1 laporan unik. Unduh lewat tombol per-file di atas.</div>
+    {% endif %}
+  {% endif %}
+
+  <hr class="sep">
+  <p class="foot">Catatan: Nama pelanggan &amp; keterangan pada laporan sumber terpotong
+     (field lebar-tetap &plusmn;16 karakter). Nilai, tanggal, waktu, dan lokasi akurat 100%.</p>
+</div>
+</body>
+</html>"""
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8501, debug=True)
