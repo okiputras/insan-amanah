@@ -33,7 +33,11 @@ def wb_to_bytes(wb):
     return buf.getvalue()
 
 
-@st.cache_data(show_spinner=False)
+_CACHE_TTL = 1800   # 30 menit - cukup untuk 1 sesi kerja, tidak menumpuk lintas hari
+_CACHE_MAX = 30     # batas jumlah file unik yang di-cache bersamaan (semua sesi/user)
+
+
+@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
 def parse_cached(file_bytes):
     try:
         text = file_bytes.decode("utf-8")
@@ -42,12 +46,12 @@ def parse_cached(file_bytes):
     return parse_report(text)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
 def build_workbook_bytes(rows, meta):
     return wb_to_bytes(build_workbook(rows, meta))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=_CACHE_TTL, max_entries=_CACHE_MAX)
 def build_combined_bytes(datasets):
     return wb_to_bytes(build_combined_workbook(datasets))
 
