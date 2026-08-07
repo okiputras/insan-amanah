@@ -33,6 +33,25 @@ def wb_to_bytes(wb):
     return buf.getvalue()
 
 
+@st.cache_data(show_spinner=False)
+def parse_cached(file_bytes):
+    try:
+        text = file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        text = file_bytes.decode("latin-1", errors="replace")
+    return parse_report(text)
+
+
+@st.cache_data(show_spinner=False)
+def build_workbook_bytes(rows, meta):
+    return wb_to_bytes(build_workbook(rows, meta))
+
+
+@st.cache_data(show_spinner=False)
+def build_combined_bytes(datasets):
+    return wb_to_bytes(build_combined_workbook(datasets))
+
+
 uploaded = st.file_uploader(
     "Pilih satu atau beberapa file laporan (.txt)",
     type=["txt"],
@@ -44,19 +63,14 @@ if not uploaded:
     st.info("⬆️ Silakan upload minimal satu file .txt untuk mulai.")
     st.stop()
 
-datasets = []          # (meta, rows) untuk file valid & unik
-seen = set()           # (kode, tanggal) untuk deteksi duplikat
+datasets = []           # (meta, rows) untuk file valid & unik
+built = []              # (fname, wb_bytes) untuk file valid & unik, dipakai ulang saat bangun .zip
+seen = set()            # (kode, tanggal) untuk deteksi duplikat
 
 st.divider()
 
-for uf in uploaded:
-    raw = uf.getvalue()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("latin-1", errors="replace")
-
-    meta, rows = parse_report(text)
+for i, uf in enumerate(uploaded):
+    meta, rows = parse_cached(uf.getvalue())
 
     with st.container(border=True):
         c_title, c_badge = st.columns([4, 1])
@@ -125,18 +139,19 @@ for uf in uploaded:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
         # --- tombol unduh per file ---
-        wb = build_workbook(rows, meta)
+        wb_bytes = build_workbook_bytes(rows, meta)
         fname = f"Transaksi_R-5401_{meta['kode'] or 'NA'}_{(meta['tanggal_label'] or '').replace('/','')}.xlsx"
         st.download_button(
             "⬇️ Unduh Excel file ini",
-            data=wb_to_bytes(wb),
+            data=wb_bytes,
             file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_{uf.name}",
+            key=f"dl_{i}_{uf.name}",
         )
 
         if not is_dup:
             datasets.append((meta, rows))
+            built.append((fname, wb_bytes))
 
 # ---------- gabungan ----------
 if len(datasets) > 1:
@@ -152,21 +167,18 @@ if len(datasets) > 1:
     cga, cgb = st.columns(2)
 
     # 1 workbook gabungan
-    wb_comb = build_combined_workbook(datasets)
     cga.download_button(
         "⬇️ Unduh 1 Excel gabungan (Data + Rekap Harian)",
-        data=wb_to_bytes(wb_comb),
+        data=build_combined_bytes(datasets),
         file_name=f"Transaksi_R-5401_GABUNGAN_{datetime.now():%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # zip semua file terpisah
+    # zip semua file terpisah (pakai workbook yang sudah dibangun di atas, tidak dibangun ulang)
     zbuf = io.BytesIO()
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for meta, rows in datasets:
-            wb = build_workbook(rows, meta)
-            name = f"Transaksi_R-5401_{meta['kode']}_{meta['tanggal_label'].replace('/','')}.xlsx"
-            zf.writestr(name, wb_to_bytes(wb))
+        for name, wb_bytes in built:
+            zf.writestr(name, wb_bytes)
     zbuf.seek(0)
     cgb.download_button(
         "⬇️ Unduh semua (.zip berisi file terpisah)",
