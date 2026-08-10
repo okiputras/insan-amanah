@@ -1,9 +1,8 @@
 """Rekonsiliasi: master siswa (xlsx) di-join ke laporan harian R-5401 (txt).
 
-Join key: No. Pelanggan (laporan) == NO VA (master siswa). Label komponen
-output sengaja "ditukar" dari nama kolom master (Kegiatan<-BPP,
-Tabungan<-KEGIATAN, Lainnya<-TABUNGAN) supaya sama dengan file target
-"Transaksi_R-5401 (...).xlsx" milik user.
+Join key: No. Pelanggan (laporan) == NO VA (master siswa). Kolom komponen
+output (BPP/Kegiatan/Tabungan) mengikuti langsung nama kolom di master siswa,
+tanpa ditukar.
 
 Tanpa pandas/numpy — baca xlsx langsung dengan openpyxl (read_only) supaya
 tetap ringan, konsisten dengan gaya parser.py.
@@ -69,7 +68,7 @@ def reconcile_pembayaran(report_rows, master):
     """Join baris laporan R-5401 (dari parser.parse_report) ke master siswa.
 
     report_rows: [no, no_pelanggan, nama, nilai, tgl(date), waktu(time), jam(int), lokasi, ket1, ket2]
-    -> list of dict siap-lapor (Kegiatan/Tabungan/Lainnya/Total Tagihan/Nilai Bayar/Selisih/Status).
+    -> list of dict siap-lapor (BPP/Kegiatan/Tabungan/Total Tagihan/Nilai Bayar/Selisih/Status).
     """
     out = []
     for row in report_rows:
@@ -79,17 +78,17 @@ def reconcile_pembayaran(report_rows, master):
         except (TypeError, ValueError):
             no_va = None
         m = master.get(no_va) if no_va is not None else None
-        kegiatan = m["BPP"] if m else 0
-        tabungan = m["KEGIATAN"] if m else 0
-        lainnya = m["TABUNGAN"] if m else 0
-        total_tagihan = kegiatan + tabungan + lainnya
+        bpp = m["BPP"] if m else 0
+        kegiatan = m["KEGIATAN"] if m else 0
+        tabungan = m["TABUNGAN"] if m else 0
+        total_tagihan = bpp + kegiatan + tabungan
         nilai_bayar = int(round(nilai))
         selisih = nilai_bayar - total_tagihan
         status = STATUS_SESUAI if selisih == 0 else (STATUS_LEBIH if selisih > 0 else STATUS_KURANG)
         out.append({
             "no_pelanggan": cust, "nama": m["nama_bersih"] if m else nama_rpt,
             "tgl": tgl, "waktu": waktu, "lokasi": lok,
-            "kegiatan": kegiatan, "tabungan": tabungan, "lainnya": lainnya,
+            "bpp": bpp, "kegiatan": kegiatan, "tabungan": tabungan,
             "total_tagihan": total_tagihan, "nilai_bayar": nilai_bayar, "selisih": selisih,
             "status": status, "matched": m is not None, "ket1": k1, "ket2": k2,
         })
@@ -112,7 +111,7 @@ _C = Alignment("center", vertical="center")
 _L = Alignment("left", vertical="center")
 _R = Alignment("right", vertical="center")
 _HEADERS = ["No", "No. Pelanggan", "Nama Pelanggan", "Tgl Transaksi", "Waktu", "Lokasi",
-            "Kegiatan", "Tabungan", "Lainnya", "Total Tagihan", "Nilai Bayar", "Selisih",
+            "BPP", "Kegiatan", "Tabungan", "Total Tagihan", "Nilai Bayar", "Selisih",
             "Status", "Keterangan 1", "Keterangan 2"]
 _MONEY_COLS = {7, 8, 9, 10, 11, 12}
 
@@ -140,7 +139,7 @@ def build_recon_workbook(rows, meta, only_sesuai=True):
     for i, row in enumerate(shown):
         r = r0 + i
         vals = [i + 1, row["no_pelanggan"], row["nama"], row["tgl"], row["waktu"], row["lokasi"],
-                row["kegiatan"], row["tabungan"], row["lainnya"],
+                row["bpp"], row["kegiatan"], row["tabungan"],
                 row["total_tagihan"], row["nilai_bayar"], row["selisih"],
                 row["status"], row["ket1"], row["ket2"]]
         for j, v in enumerate(vals, 1):

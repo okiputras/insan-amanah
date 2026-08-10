@@ -255,7 +255,7 @@ def rekap_proses():
     preview = [{
         "no_pelanggan": r["no_pelanggan"], "nama": r["nama"], "lokasi": r["lokasi"],
         "tgl": r["tgl"].strftime("%d/%m/%Y"), "waktu": r["waktu"].strftime("%H:%M:%S"),
-        "kegiatan": ribuan(r["kegiatan"]), "tabungan": ribuan(r["tabungan"]), "lainnya": ribuan(r["lainnya"]),
+        "bpp": ribuan(r["bpp"]), "kegiatan": ribuan(r["kegiatan"]), "tabungan": ribuan(r["tabungan"]),
         "total_tagihan": ribuan(r["total_tagihan"]), "nilai_bayar": ribuan(r["nilai_bayar"]),
         "ket1": r["ket1"], "ket2": r["ket2"],
     } for r in shown[:PREVIEW_LIMIT]]
@@ -543,7 +543,7 @@ REKAP_PAGE = """<!doctype html>
           <table>
             <thead><tr>
               <th>No. Pelanggan</th><th>Nama</th><th>Tgl</th><th>Waktu</th><th>Lokasi</th>
-              <th>Kegiatan</th><th>Tabungan</th><th>Lainnya</th>
+              <th>BPP</th><th>Kegiatan</th><th>Tabungan</th>
               <th>Total Tagihan</th><th>Nilai Bayar</th><th>Ket 1</th><th>Ket 2</th>
             </tr></thead>
             <tbody>
@@ -551,7 +551,7 @@ REKAP_PAGE = """<!doctype html>
                 <tr>
                   <td>{{ row.no_pelanggan }}</td><td>{{ row.nama }}</td><td>{{ row.tgl }}</td>
                   <td>{{ row.waktu }}</td><td>{{ row.lokasi }}</td>
-                  <td class="num">{{ row.kegiatan }}</td><td class="num">{{ row.tabungan }}</td><td class="num">{{ row.lainnya }}</td>
+                  <td class="num">{{ row.bpp }}</td><td class="num">{{ row.kegiatan }}</td><td class="num">{{ row.tabungan }}</td>
                   <td class="num">{{ row.total_tagihan }}</td><td class="num">{{ row.nilai_bayar }}</td>
                   <td>{{ row.ket1 }}</td><td>{{ row.ket2 }}</td>
                 </tr>
