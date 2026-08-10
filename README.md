@@ -1,20 +1,34 @@
-# Konverter Laporan R-5401 → Excel
+# Konverter & Validator Laporan Insan Amanah
 
-Aplikasi web untuk mengubah file laporan transaksi harian bank (R-5401, format
-teks lebar-tetap) menjadi file Excel rapi berisi sheet **Data Transaksi** dan
-**Ringkasan** (KPI, rekap per lokasi/channel, rekap per jam). Mendukung upload
-banyak file sekaligus, validasi otomatis terhadap total footer laporan, dan
-unduh gabungan.
+Aplikasi web dengan 2 menu:
+
+1. **Konversi R-5401** — mengubah file laporan transaksi harian bank (R-5401, format
+   teks lebar-tetap) menjadi file Excel rapi berisi sheet **Data Transaksi** dan
+   **Ringkasan** (KPI, rekap per lokasi/channel, rekap per jam). Mendukung upload
+   banyak file sekaligus, validasi otomatis terhadap total footer laporan, dan
+   unduh gabungan.
+2. **Validasi Master** — mencocokkan **master siswa** (`.xlsx`: NO VA, NAMA, BPP,
+   KEGIATAN, TABUNGAN) dengan **master bank UPLDREQ** (`.txt` lebar-tetap, file
+   upload VA ke bank) per NO VA, menandai baris yang beda nominal atau tidak
+   ditemukan pasangannya di salah satu file, lalu menghasilkan Excel hasil validasi.
 
 Dibangun **ringan** dengan Flask + openpyxl (tanpa numpy/pandas/pyarrow), memakai
 HTTP request/response biasa — hemat memori dan stabil di container kecil.
 
 ## Fitur
+
+**Konversi R-5401**
 - Upload 1 atau banyak file `.txt` sekaligus.
 - Parsing fixed-width + ekstraksi metadata (kode PT, nama, cabang, tanggal) otomatis.
 - **Validasi**: total & jumlah transaksi hasil parsing dicocokkan dengan footer laporan.
 - Deteksi duplikat (kode + tanggal sama) agar tidak dobel di file gabungan.
 - Unduh per-file, unduh 1 Excel gabungan (+ sheet Rekap Harian), atau unduh `.zip` semua file.
+
+**Validasi Master**
+- Upload 1 file master siswa (`.xlsx`) + 1 file master bank UPLDREQ (`.txt`).
+- Cocokkan BPP/KEGIATAN/TABUNGAN per NO VA antar kedua file; status `Sesuai`,
+  `Beda Nominal`, `Hanya di Master Siswa`, atau `Hanya di UPLDREQ`.
+- Unduh Excel hasil validasi (sheet Ringkasan + Validasi, baris beda ditandai kuning).
 
 ## Menjalankan lokal
 ```bash
@@ -29,8 +43,9 @@ Buka http://localhost:8501
 
 ## Struktur file
 ```
-app.py            # aplikasi Flask (routing, upload, render hasil, endpoint unduh)
+app.py            # aplikasi Flask (routing, upload, render hasil, endpoint unduh, 2 menu)
 parser.py         # parsing R-5401 + pembuatan Excel (openpyxl)
+validator.py      # parsing master siswa (xlsx) + master bank UPLDREQ (txt), cross-validate, Excel
 requirements.txt  # Flask, openpyxl, gunicorn
 Procfile          # start command untuk platform berbasis Procfile
 railway.json      # start command untuk Railway
