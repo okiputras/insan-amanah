@@ -1,9 +1,8 @@
-"""Rekonsiliasi: master siswa (xlsx) di-join ke laporan harian R-5401 (txt).
+"""Validasi: master siswa (xlsx) vs master bank UPLDREQ (txt, fixed-width).
 
-Join key: No. Pelanggan (laporan) == NO VA (master siswa). Label komponen
-output sengaja "ditukar" dari nama kolom master (Kegiatan<-BPP,
-Tabungan<-KEGIATAN, Lainnya<-TABUNGAN) supaya sama dengan file target
-"Transaksi_R-5401 (...).xlsx" milik user.
+Join key: NO VA (master siswa) == NO VA (UPLDREQ). Sheet Validasi hanya
+menampilkan baris berstatus Sesuai (BPP/KEGIATAN/TABUNGAN cocok persis);
+sheet Ringkasan tetap merangkum semua status.
 
 Tanpa pandas/numpy — baca xlsx langsung dengan openpyxl (read_only) supaya
 tetap ringan, konsisten dengan gaya parser.py.
@@ -16,6 +15,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 _KELAS = re.compile(r"\b(I|II|III|IV|V|VI)\s+([A-F])\b")
+_UPLDREQ_HEADER = re.compile(r"^0(\d{5})C(\d{2})(\d{2})(\d{4})")
 
 
 def _kelas(nama):
@@ -60,40 +60,79 @@ def parse_master_siswa(file_bytes):
     return out
 
 
-STATUS_SESUAI = "Sesuai"
-STATUS_KURANG = "Kurang"
-STATUS_LEBIH = "Lebih"
+def parse_uploadreq(text, scale=100):
+    """Isi teks UPLDREQ_ddmmyyyyhhmmss.txt -> (meta, dict {no_va: row}).
 
-
-def reconcile_pembayaran(report_rows, master):
-    """Join baris laporan R-5401 (dari parser.parse_report) ke master siswa.
-
-    report_rows: [no, no_pelanggan, nama, nilai, tgl(date), waktu(time), jam(int), lokasi, ket1, ket2]
-    -> list of dict siap-lapor (Kegiatan/Tabungan/Lainnya/Total Tagihan/Nilai Bayar/Selisih/Status).
+    Layout (diverifikasi terhadap file UPLDREQ asli):
+      pos 0        : tipe record ('0' header, '1' detail)
+      pos 1..5     : biller (5), mis. '64219'
+      pos 6..14    : NO VA (digit lalu spasi pengisi, mis. '1851     ')
+      pos 29..idr-8: nama (dipotong ~30 char)
+      setelah IDR  : blok nominal, tiap field 15 digit, nilai = angka // scale.
+                     Urutan: TOTAL, BPP, KEGIATAN, TABUNGAN.
     """
-    out = []
-    for row in report_rows:
-        no, cust, nama_rpt, nilai, tgl, waktu, jam, lok, k1, k2 = row
+    meta = {"biller": "", "tanggal_label": ""}
+    out = {}
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not line:
+            continue
+        if line[0] == "0":
+            if not meta["biller"]:
+                m = _UPLDREQ_HEADER.match(line)
+                if m:
+                    meta["biller"] = m.group(1)
+                    meta["tanggal_label"] = f"{m.group(2)}/{m.group(3)}/{m.group(4)}"
+            continue
+        if line[0] != "1":
+            continue
+        idr = line.find("IDR")
+        if idr < 0:
+            continue
         try:
-            no_va = int(cust)
-        except (TypeError, ValueError):
-            no_va = None
-        m = master.get(no_va) if no_va is not None else None
-        kegiatan = m["BPP"] if m else 0
-        tabungan = m["KEGIATAN"] if m else 0
-        lainnya = m["TABUNGAN"] if m else 0
-        total_tagihan = kegiatan + tabungan + lainnya
-        nilai_bayar = int(round(nilai))
-        selisih = nilai_bayar - total_tagihan
-        status = STATUS_SESUAI if selisih == 0 else (STATUS_LEBIH if selisih > 0 else STATUS_KURANG)
-        out.append({
-            "no_pelanggan": cust, "nama": m["nama_bersih"] if m else nama_rpt,
-            "tgl": tgl, "waktu": waktu, "lokasi": lok,
-            "kegiatan": kegiatan, "tabungan": tabungan, "lainnya": lainnya,
-            "total_tagihan": total_tagihan, "nilai_bayar": nilai_bayar, "selisih": selisih,
-            "status": status, "matched": m is not None, "ket1": k1, "ket2": k2,
+            no_va = int(line[6:15].strip())
+            nama = line[29:idr - 8].strip()
+            amt = line[idr + 3:]
+            fields = [int(amt[i:i + 15]) // scale for i in range(0, 15 * 4, 15)]
+        except (ValueError, IndexError):
+            continue
+        out[no_va] = {
+            "no_va": no_va, "nama_bank": nama,
+            "total": fields[0], "BPP": fields[1], "KEGIATAN": fields[2], "TABUNGAN": fields[3],
+        }
+    return meta, out
+
+
+_KOMPONEN = ("BPP", "KEGIATAN", "TABUNGAN")
+
+STATUS_SESUAI = "Sesuai"
+STATUS_BEDA = "Beda Nominal"
+STATUS_HANYA_MASTER = "Hanya di Master Siswa"
+STATUS_HANYA_BANK = "Hanya di UPLDREQ"
+
+
+def cross_validate(master, bank):
+    """Gabungkan master siswa & master bank by NO VA -> list of dict siap-lapor."""
+    rows = []
+    for no_va in sorted(set(master) | set(bank)):
+        m, b = master.get(no_va), bank.get(no_va)
+        if m and b:
+            beda = [k for k in _KOMPONEN if m[k] != b[k]]
+            status = STATUS_SESUAI if not beda else STATUS_BEDA
+            ket = "" if not beda else "Beda: " + ", ".join(beda)
+            nama, kelas = m["nama_bersih"], m["kelas"]
+            bpp, kegiatan, tabungan = m["BPP"], m["KEGIATAN"], m["TABUNGAN"]
+        elif m:
+            status, ket, nama, kelas = STATUS_HANYA_MASTER, "Tidak ditemukan di UPLDREQ", m["nama_bersih"], m["kelas"]
+            bpp, kegiatan, tabungan = m["BPP"], m["KEGIATAN"], m["TABUNGAN"]
+        else:
+            status, ket, nama, kelas = STATUS_HANYA_BANK, "Tidak ditemukan di Master Siswa", b["nama_bank"], ""
+            bpp, kegiatan, tabungan = b["BPP"], b["KEGIATAN"], b["TABUNGAN"]
+        rows.append({
+            "no_va": no_va, "nama": nama, "kelas": kelas,
+            "bpp": bpp, "kegiatan": kegiatan, "tabungan": tabungan, "total": bpp + kegiatan + tabungan,
+            "status": status, "keterangan": ket,
         })
-    return out
+    return rows
 
 
 # ---------- styling (selaras dengan parser.py) ----------
@@ -111,25 +150,23 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _C = Alignment("center", vertical="center")
 _L = Alignment("left", vertical="center")
 _R = Alignment("right", vertical="center")
-_HEADERS = ["No", "No. Pelanggan", "Nama Pelanggan", "Tgl Transaksi", "Waktu", "Lokasi",
-            "Kegiatan", "Tabungan", "Lainnya", "Total Tagihan", "Nilai Bayar", "Selisih",
-            "Status", "Keterangan 1", "Keterangan 2"]
-_MONEY_COLS = {7, 8, 9, 10, 11, 12}
+_HEADERS = ["No", "NO VA", "Nama Siswa", "Kelas", "BPP", "Kegiatan", "Tabungan", "Total", "Status"]
+_MONEY_COLS = {5, 6, 7, 8}
 
 
-def build_recon_workbook(rows, meta, only_sesuai=True):
-    """rows: hasil reconcile_pembayaran(). Sheet Transaksi hanya berisi baris
-    Status == Sesuai bila only_sesuai=True; sheet Ringkasan tetap merangkum semua baris."""
+def build_validation_workbook(rows, bank_meta, only_sesuai=True):
+    """rows: hasil cross_validate(). Sheet Validasi hanya berisi baris Sesuai
+    bila only_sesuai=True; sheet Ringkasan tetap merangkum semua status."""
     shown = [r for r in rows if r["status"] == STATUS_SESUAI] if only_sesuai else rows
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Transaksi"
+    ws.title = "Validasi"
     ws.sheet_view.showGridLines = False
-    ws["A1"] = "TRANSAKSI R-5401 vs MASTER SISWA"
+    ws["A1"] = "VALIDASI MASTER SISWA vs MASTER BANK (UPLDREQ)"
     ws["A1"].font = _TITLE
-    ws["A2"] = (f"{meta.get('nama_pt','') or ''} ({meta.get('kode','') or '—'})  •  "
-                f"Tanggal: {meta.get('tanggal_label','') or '—'}"
+    ws["A2"] = (f"Biller {bank_meta.get('biller') or '—'}  •  "
+                f"Tanggal jatuh tempo: {bank_meta.get('tanggal_label') or '—'}"
                 + ("  •  hanya status Sesuai" if only_sesuai else ""))
     ws["A2"].font = _SUB
     HROW = 4
@@ -139,25 +176,19 @@ def build_recon_workbook(rows, meta, only_sesuai=True):
     r0 = HROW + 1
     for i, row in enumerate(shown):
         r = r0 + i
-        vals = [i + 1, row["no_pelanggan"], row["nama"], row["tgl"], row["waktu"], row["lokasi"],
-                row["kegiatan"], row["tabungan"], row["lainnya"],
-                row["total_tagihan"], row["nilai_bayar"], row["selisih"],
-                row["status"], row["ket1"], row["ket2"]]
+        vals = [i + 1, row["no_va"], row["nama"], row["kelas"],
+                row["bpp"], row["kegiatan"], row["tabungan"], row["total"], row["status"]]
         for j, v in enumerate(vals, 1):
             cell = ws.cell(r, j, v)
             cell.font = _BASE; cell.border = _BORDER
             if j in _MONEY_COLS:
                 cell.number_format = '#,##0'; cell.alignment = _R
-            elif j == 4:
-                cell.number_format = 'dd/mm/yyyy'; cell.alignment = _C
-            elif j == 5:
-                cell.number_format = 'hh:mm:ss'; cell.alignment = _C
-            elif j in (1, 2, 6, 13):
+            elif j in (1, 2, 4, 9):
                 cell.alignment = _C
             else:
                 cell.alignment = _L
         if row["status"] == STATUS_SESUAI:
-            ws.cell(r, 13).fill = _OK
+            ws.cell(r, 9).fill = _OK
     last = r0 + len(shown) - 1
 
     gt = last + 1
@@ -170,51 +201,37 @@ def build_recon_workbook(rows, meta, only_sesuai=True):
     for j in range(1, len(_HEADERS) + 1):
         cell = ws.cell(gt, j); cell.fill = _TFILL; cell.border = _BORDER; cell.font = _BOLD
 
-    widths = [5, 12, 28, 13, 10, 8, 12, 12, 12, 14, 14, 12, 10, 16, 16]
+    widths = [6, 10, 28, 8, 13, 14, 14, 14, 20]
     for j, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.freeze_panes = "A5"
 
-    _build_ringkasan(wb, rows, shown, meta, only_sesuai)
+    _build_ringkasan(wb, rows, shown, bank_meta, only_sesuai)
     return wb
 
 
-def _build_ringkasan(wb, rows, shown, meta, only_sesuai):
+def _build_ringkasan(wb, rows, shown, bank_meta, only_sesuai):
     rs = wb.create_sheet("Ringkasan", 0)
     rs.sheet_view.showGridLines = False
-    rs["A1"] = "RINGKASAN REKONSILIASI"; rs["A1"].font = _TITLE
-
-    n_sesuai = sum(1 for r in rows if r["status"] == STATUS_SESUAI)
-    n_kurang = sum(1 for r in rows if r["status"] == STATUS_KURANG)
-    n_lebih = sum(1 for r in rows if r["status"] == STATUS_LEBIH)
-    n_unmatched = sum(1 for r in rows if not r["matched"])
-    total_bayar_shown = sum(r["nilai_bayar"] for r in shown)
-
+    rs["A1"] = "RINGKASAN VALIDASI"; rs["A1"].font = _TITLE
+    from collections import Counter
+    n = Counter(r["status"] for r in rows)
     info = [
-        ("Laporan", "R-5401 — Transaksi via E-Banking & Counter"),
-        ("Nama Perusahaan", f"{meta.get('kode','') or '—'}-{meta.get('nama_pt','') or ''}".strip("-")),
-        ("Tanggal", meta.get("tanggal_label", "") or "—"),
-        ("Total Transaksi (laporan)", len(rows)),
-        (f"Ditampilkan di sheet Transaksi{' (hanya Sesuai)' if only_sesuai else ''}", len(shown)),
-        ("— Rincian Status (semua transaksi laporan) —", ""),
-        (STATUS_SESUAI, n_sesuai),
-        (STATUS_KURANG, n_kurang),
-        (STATUS_LEBIH, n_lebih),
-        ("Tanpa data master (No. Pelanggan tak ditemukan)", n_unmatched),
-        ("Total Nilai Bayar (yang ditampilkan)", total_bayar_shown),
+        ("Biller", bank_meta.get("biller") or "—"),
+        ("Tanggal jatuh tempo (UPLDREQ)", bank_meta.get("tanggal_label") or "—"),
+        ("Total NO VA (gabungan)", len(rows)),
+        (f"Ditampilkan di sheet Validasi{' (hanya Sesuai)' if only_sesuai else ''}", len(shown)),
+        (STATUS_SESUAI, n.get(STATUS_SESUAI, 0)),
+        (STATUS_BEDA, n.get(STATUS_BEDA, 0)),
+        (STATUS_HANYA_MASTER, n.get(STATUS_HANYA_MASTER, 0)),
+        (STATUS_HANYA_BANK, n.get(STATUS_HANYA_BANK, 0)),
     ]
     r = 3
     for k, v in info:
         a = rs.cell(r, 1, k); b = rs.cell(r, 2, v)
-        head = str(k).startswith("—")
-        a.font = Font(_A, size=10, bold=head); b.font = _BOLD if isinstance(v, int) else _BASE
-        fill = _TFILL if head else _OK
-        a.fill = fill; b.fill = fill; a.border = _BORDER; b.border = _BORDER
-        a.alignment = _L
-        if isinstance(v, int):
-            b.number_format = '#,##0'; b.alignment = _R
-        else:
-            b.alignment = _L
+        a.font = _BASE; b.font = _BOLD if isinstance(v, int) else _BASE
+        a.fill = _OK; b.fill = _OK; a.border = _BORDER; b.border = _BORDER
+        a.alignment = _L; b.alignment = _R if isinstance(v, int) else _L
         r += 1
-    rs.column_dimensions["A"].width = 40
-    rs.column_dimensions["B"].width = 28
+    rs.column_dimensions["A"].width = 32
+    rs.column_dimensions["B"].width = 24
