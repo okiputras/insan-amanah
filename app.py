@@ -17,7 +17,7 @@ from flask import (
 )
 
 from parser import parse_report, build_workbook, build_combined_workbook
-from validator import parse_master_siswa, parse_uploadreq, cross_validate, build_validation_workbook
+from validator import parse_master_siswa, reconcile_pembayaran, build_recon_workbook
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
@@ -215,26 +215,26 @@ def dl_zip(token):
     return _send(entry["zip"] if entry else None)
 
 
-# ---------- menu: validasi master siswa vs master bank UPLDREQ (hanya Sesuai) ----------
-@app.route("/validasi", methods=["GET"])
-def validasi():
-    return render_template_string(VALIDASI_PAGE, result=None, token=None, error=None, active="validasi")
+# ---------- menu: rekap pembayaran R-5401 vs master siswa (hanya Sesuai) ----------
+@app.route("/rekap", methods=["GET"])
+def rekap():
+    return render_template_string(REKAP_PAGE, result=None, token=None, error=None, active="rekap")
 
 
-@app.route("/validasi/proses", methods=["POST"])
-def validasi_proses():
+@app.route("/rekap/proses", methods=["POST"])
+def rekap_proses():
     f_master = request.files.get("master")
-    f_bank = request.files.get("bank")
+    f_laporan = request.files.get("laporan")
 
     def _err(msg):
-        return render_template_string(VALIDASI_PAGE, result=None, token=None, error=msg, active="validasi")
+        return render_template_string(REKAP_PAGE, result=None, token=None, error=msg, active="rekap")
 
-    if not f_master or not f_master.filename or not f_bank or not f_bank.filename:
-        return _err("Mohon upload kedua file: master siswa (.xlsx) dan master bank UPLDREQ (.txt).")
+    if not f_master or not f_master.filename or not f_laporan or not f_laporan.filename:
+        return _err("Mohon upload kedua file: master siswa (.xlsx) dan laporan harian R-5401 (.txt).")
     if not f_master.filename.lower().endswith((".xlsx", ".xlsm")):
         return _err(f"File master siswa ({f_master.filename}) harus berformat .xlsx.")
-    if not f_bank.filename.lower().endswith(".txt"):
-        return _err(f"File master bank ({f_bank.filename}) harus berformat .txt.")
+    if not f_laporan.filename.lower().endswith(".txt"):
+        return _err(f"File laporan ({f_laporan.filename}) harus berformat .txt.")
 
     try:
         master = parse_master_siswa(f_master.read())
@@ -244,40 +244,42 @@ def validasi_proses():
     if not master:
         return _err("Tidak ada baris siswa valid yang terbaca dari file master siswa.")
 
-    bank_meta, bank = parse_uploadreq(_decode(f_bank.read()))
-    if not bank:
-        return _err("Tidak ada baris NO VA valid yang terbaca dari file master bank. Pastikan ini "
-                    "file UPLDREQ lebar-tetap dari bank.")
+    meta, report_rows = parse_report(_decode(f_laporan.read()))
+    if not report_rows:
+        return _err("Tidak ada baris transaksi terbaca dari file laporan. Pastikan ini file laporan "
+                    "R-5401 dengan format lebar-tetap yang benar.")
 
-    rows = cross_validate(master, bank)
+    rows = reconcile_pembayaran(report_rows, master)
     shown = [r for r in rows if r["status"] == "Sesuai"]
 
     preview = [{
-        "no_va": r["no_va"], "nama": r["nama"], "kelas": r["kelas"],
-        "bpp": ribuan(r["bpp"]), "kegiatan": ribuan(r["kegiatan"]), "tabungan": ribuan(r["tabungan"]),
-        "total": ribuan(r["total"]),
+        "no_pelanggan": r["no_pelanggan"], "nama": r["nama"], "lokasi": r["lokasi"],
+        "tgl": r["tgl"].strftime("%d/%m/%Y"), "waktu": r["waktu"].strftime("%H:%M:%S"),
+        "kegiatan": ribuan(r["kegiatan"]), "tabungan": ribuan(r["tabungan"]), "lainnya": ribuan(r["lainnya"]),
+        "total_tagihan": ribuan(r["total_tagihan"]), "nilai_bayar": ribuan(r["nilai_bayar"]),
+        "ket1": r["ket1"], "ket2": r["ket2"],
     } for r in shown[:PREVIEW_LIMIT]]
 
-    tgl = (bank_meta.get("tanggal_label") or "").replace("/", "")
-    dname = f"Validasi_Sesuai_MasterSiswa_UPLDREQ_{bank_meta.get('biller') or 'NA'}_{tgl or 'NA'}.xlsx"
-    xbytes = wb_to_bytes(build_validation_workbook(rows, bank_meta, only_sesuai=True))
-    token = _store({"validasi": (dname, xbytes)})
+    tgl = (meta.get("tanggal_label") or "").replace("/", "")
+    dname = f"Rekap_Sesuai_R-5401_{meta.get('kode') or 'NA'}_{tgl or 'NA'}.xlsx"
+    xbytes = wb_to_bytes(build_recon_workbook(rows, meta, only_sesuai=True))
+    token = _store({"rekap": (dname, xbytes)})
 
     result = {
-        "master_name": f_master.filename, "bank_name": f_bank.filename, "meta": bank_meta,
+        "master_name": f_master.filename, "laporan_name": f_laporan.filename, "meta": meta,
         "n_total": len(rows), "n_sesuai": len(shown),
-        "n_beda": sum(1 for r in rows if r["status"] == "Beda Nominal"),
-        "n_hm": sum(1 for r in rows if r["status"] == "Hanya di Master Siswa"),
-        "n_hb": sum(1 for r in rows if r["status"] == "Hanya di UPLDREQ"),
+        "n_kurang": sum(1 for r in rows if r["status"] == "Kurang"),
+        "n_lebih": sum(1 for r in rows if r["status"] == "Lebih"),
+        "n_unmatched": sum(1 for r in rows if not r["matched"]),
         "preview": preview, "preview_more": max(0, len(shown) - len(preview)),
     }
-    return render_template_string(VALIDASI_PAGE, result=result, token=token, error=None, active="validasi")
+    return render_template_string(REKAP_PAGE, result=result, token=token, error=None, active="rekap")
 
 
-@app.route("/dl/<token>/validasi")
-def dl_validasi(token):
+@app.route("/dl/<token>/rekap")
+def dl_rekap(token):
     entry = _get(token)
-    return _send(entry["validasi"] if entry else None)
+    return _send(entry["rekap"] if entry else None)
 
 
 @app.route("/health")
@@ -370,7 +372,7 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <div class="nav">
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
-    <a href="{{ url_for('validasi') }}" class="{{ 'active' if active=='validasi' else '' }}">Validasi Master</a>
+    <a href="{{ url_for('rekap') }}" class="{{ 'active' if active=='rekap' else '' }}">Rekap vs Master Siswa</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -478,36 +480,36 @@ PAGE = """<!doctype html>
 </html>"""
 
 
-VALIDASI_PAGE = """<!doctype html>
+REKAP_PAGE = """<!doctype html>
 <html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Validasi Master Siswa vs UPLDREQ</title>
+<title>Rekap Pembayaran vs Master Siswa</title>
 <style>""" + STYLE + """</style>
 </head>
 <body>
 <div class="wrap">
   <div class="nav">
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
-    <a href="{{ url_for('validasi') }}" class="{{ 'active' if active=='validasi' else '' }}">Validasi Master</a>
+    <a href="{{ url_for('rekap') }}" class="{{ 'active' if active=='rekap' else '' }}">Rekap vs Master Siswa</a>
   </div>
-  <h1>&#128203; Validasi Master Siswa vs UPLDREQ</h1>
+  <h1>&#128203; Rekap Pembayaran vs Master Siswa</h1>
   <p class="sub">Upload <strong>master siswa</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN, TABUNGAN) dan
-     <strong>master bank UPLDREQ</strong> (.txt lebar-tetap) untuk mencocokkan tagihan per NO VA.
-     Hasil Excel hanya berisi NO VA berstatus <strong>Sesuai</strong> (nominal cocok persis
-     di kedua file).</p>
+     <strong>laporan harian R-5401</strong> (.txt lebar-tetap) untuk mencocokkan tiap transaksi
+     (No. Pelanggan = NO VA) ke tagihannya. Hasil Excel hanya berisi transaksi berstatus
+     <strong>Sesuai</strong> (Nilai Bayar = Total Tagihan).</p>
 
-  <form class="up" method="post" action="{{ url_for('validasi_proses') }}" enctype="multipart/form-data">
+  <form class="up" method="post" action="{{ url_for('rekap_proses') }}" enctype="multipart/form-data">
     <div class="field">
       <label class="lbl" for="master">Master siswa (.xlsx)</label>
       <input id="master" type="file" name="master" accept=".xlsx" required>
     </div>
     <div class="field">
-      <label class="lbl" for="bank">Master bank UPLDREQ (.txt)</label>
-      <input id="bank" type="file" name="bank" accept=".txt" required>
+      <label class="lbl" for="laporan">Laporan harian R-5401 (.txt)</label>
+      <input id="laporan" type="file" name="laporan" accept=".txt" required>
     </div>
-    <button class="btn primary" type="submit">&#9889; Validasi</button>
+    <button class="btn primary" type="submit">&#9889; Proses</button>
   </form>
 
   {% if error %}
@@ -517,37 +519,41 @@ VALIDASI_PAGE = """<!doctype html>
   {% if result %}
     <div class="card {{ 'valid' if result.n_sesuai == result.n_total else 'mismatch' }}">
       <div class="chead">
-        <h2>&#128196; {{ result.master_name }} &harr; {{ result.bank_name }}</h2>
+        <h2>&#128196; {{ result.master_name }} &harr; {{ result.laporan_name }}</h2>
         {% if result.n_sesuai == result.n_total %}<span class="badge valid">&#10003; Semua Sesuai</span>
         {% else %}<span class="badge mismatch">Ada Selisih</span>{% endif %}
       </div>
 
       <div class="metrics">
-        <div class="metric"><div class="k">Total NO VA</div><div class="v">{{ result.n_total }}</div></div>
+        <div class="metric"><div class="k">Total Transaksi</div><div class="v">{{ result.n_total }}</div></div>
         <div class="metric"><div class="k">Sesuai</div><div class="v">{{ result.n_sesuai }}</div></div>
-        <div class="metric"><div class="k">Beda Nominal</div><div class="v">{{ result.n_beda }}</div></div>
-        <div class="metric"><div class="k">Hanya di Satu File</div><div class="v">{{ result.n_hm + result.n_hb }}</div></div>
+        <div class="metric"><div class="k">Kurang</div><div class="v">{{ result.n_kurang }}</div></div>
+        <div class="metric"><div class="k">Lebih</div><div class="v">{{ result.n_lebih }}</div></div>
       </div>
-
-      {% if result.meta.tanggal_label %}
-        <p class="pt">Biller <strong>{{ result.meta.biller }}</strong> &bull;
-           Tanggal jatuh tempo {{ result.meta.tanggal_label }}</p>
+      {% if result.n_unmatched %}
+        <div class="alert warn">&#9888; {{ result.n_unmatched }} transaksi tidak ditemukan No. Pelanggannya
+           di master siswa (dianggap tagihan 0, otomatis tidak masuk status Sesuai).</div>
       {% endif %}
 
+      {% if result.meta.nama_pt %}<p class="pt"><strong>{{ result.meta.nama_pt }}</strong> &bull; {{ result.meta.cabang }} &bull; {{ result.meta.tanggal_label }}</p>{% endif %}
+
       <details open>
-        <summary>&#128065; Lihat NO VA Sesuai ({{ result.n_sesuai }} baris)</summary>
+        <summary>&#128065; Lihat transaksi Sesuai ({{ result.n_sesuai }} baris)</summary>
         <div class="tblwrap">
           <table>
             <thead><tr>
-              <th>NO VA</th><th>Nama</th><th>Kelas</th>
-              <th>BPP</th><th>Kegiatan</th><th>Tabungan</th><th>Total</th>
+              <th>No. Pelanggan</th><th>Nama</th><th>Tgl</th><th>Waktu</th><th>Lokasi</th>
+              <th>Kegiatan</th><th>Tabungan</th><th>Lainnya</th>
+              <th>Total Tagihan</th><th>Nilai Bayar</th><th>Ket 1</th><th>Ket 2</th>
             </tr></thead>
             <tbody>
               {% for row in result.preview %}
                 <tr>
-                  <td>{{ row.no_va }}</td><td>{{ row.nama }}</td><td>{{ row.kelas }}</td>
-                  <td class="num">{{ row.bpp }}</td><td class="num">{{ row.kegiatan }}</td>
-                  <td class="num">{{ row.tabungan }}</td><td class="num">{{ row.total }}</td>
+                  <td>{{ row.no_pelanggan }}</td><td>{{ row.nama }}</td><td>{{ row.tgl }}</td>
+                  <td>{{ row.waktu }}</td><td>{{ row.lokasi }}</td>
+                  <td class="num">{{ row.kegiatan }}</td><td class="num">{{ row.tabungan }}</td><td class="num">{{ row.lainnya }}</td>
+                  <td class="num">{{ row.total_tagihan }}</td><td class="num">{{ row.nilai_bayar }}</td>
+                  <td>{{ row.ket1 }}</td><td>{{ row.ket2 }}</td>
                 </tr>
               {% endfor %}
             </tbody>
@@ -556,14 +562,14 @@ VALIDASI_PAGE = """<!doctype html>
         </div>
       </details>
 
-      <a class="btn dl" href="{{ url_for('dl_validasi', token=token) }}">&#11015; Unduh Excel (hanya Sesuai)</a>
+      <a class="btn dl" href="{{ url_for('dl_rekap', token=token) }}">&#11015; Unduh Excel (hanya Sesuai)</a>
     </div>
   {% endif %}
 
   <hr class="sep">
-  <p class="foot">Catatan: pencocokan berdasarkan NO VA. Hanya NO VA berstatus Sesuai yang masuk
-     file Excel; sheet Ringkasan tetap merangkum semua status (Beda Nominal, Hanya di Master Siswa,
-     Hanya di UPLDREQ).</p>
+  <p class="foot">Catatan: pencocokan berdasarkan No. Pelanggan (laporan) = NO VA (master siswa).
+     Hanya transaksi berstatus Sesuai yang masuk file Excel; sheet Ringkasan tetap merangkum
+     seluruh transaksi termasuk Kurang/Lebih/tanpa data master.</p>
 </div>
 </body>
 </html>"""

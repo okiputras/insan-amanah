@@ -1,4 +1,4 @@
-# Konverter & Validator Laporan Insan Amanah
+# Konverter & Rekap Laporan Insan Amanah
 
 Aplikasi web dengan 2 menu:
 
@@ -7,10 +7,10 @@ Aplikasi web dengan 2 menu:
    **Ringkasan** (KPI, rekap per lokasi/channel, rekap per jam). Mendukung upload
    banyak file sekaligus, validasi otomatis terhadap total footer laporan, dan
    unduh gabungan.
-2. **Validasi Master** — mencocokkan **master siswa** (`.xlsx`: NO VA, NAMA, BPP,
-   KEGIATAN, TABUNGAN) dengan **master bank UPLDREQ** (`.txt` lebar-tetap, file
-   upload VA ke bank) per NO VA, lalu menghasilkan Excel yang **hanya berisi NO VA
-   berstatus Sesuai** (BPP/KEGIATAN/TABUNGAN cocok persis di kedua file).
+2. **Rekap vs Master Siswa** — meng-join **laporan harian R-5401** (`.txt`) dengan
+   **master siswa** (`.xlsx`: NO VA, NAMA, BPP, KEGIATAN, TABUNGAN) per No. Pelanggan
+   = NO VA, menghitung Total Tagihan/Nilai Bayar/Selisih/Status per transaksi, lalu
+   menghasilkan Excel yang **hanya berisi transaksi berstatus Sesuai**.
 
 Dibangun **ringan** dengan Flask + openpyxl (tanpa numpy/pandas/pyarrow), memakai
 HTTP request/response biasa — hemat memori dan stabil di container kecil.
@@ -24,12 +24,13 @@ HTTP request/response biasa — hemat memori dan stabil di container kecil.
 - Deteksi duplikat (kode + tanggal sama) agar tidak dobel di file gabungan.
 - Unduh per-file, unduh 1 Excel gabungan (+ sheet Rekap Harian), atau unduh `.zip` semua file.
 
-**Validasi Master**
-- Upload 1 file master siswa (`.xlsx`) + 1 file master bank UPLDREQ (`.txt`).
-- Cocokkan BPP/KEGIATAN/TABUNGAN per NO VA antar kedua file; status `Sesuai`,
-  `Beda Nominal`, `Hanya di Master Siswa`, atau `Hanya di UPLDREQ`.
-- Unduh Excel (sheet Ringkasan + Validasi) — sheet Validasi **hanya memuat NO VA Sesuai**;
-  Ringkasan tetap merangkum semua status.
+**Rekap vs Master Siswa**
+- Upload 1 file master siswa (`.xlsx`) + 1 file laporan harian R-5401 (`.txt`).
+- Join per transaksi: No. Pelanggan (laporan) = NO VA (master); label kolom output
+  Kegiatan/Tabungan/Lainnya mengikuti BPP/KEGIATAN/TABUNGAN dari master.
+- Status per transaksi: `Sesuai` (Nilai Bayar = Total Tagihan), `Kurang`, atau `Lebih`.
+- Unduh Excel (sheet Ringkasan + Transaksi) — sheet Transaksi **hanya memuat baris Sesuai**;
+  Ringkasan tetap merangkum seluruh transaksi (termasuk Kurang/Lebih/tanpa data master).
 
 ## Menjalankan lokal
 ```bash
@@ -46,7 +47,7 @@ Buka http://localhost:8501
 ```
 app.py            # aplikasi Flask (routing, upload, render hasil, endpoint unduh, 2 menu)
 parser.py         # parsing R-5401 + pembuatan Excel (openpyxl)
-validator.py      # parsing master siswa (xlsx) + master bank UPLDREQ (txt), cross-validate, Excel (Sesuai saja)
+validator.py      # parsing master siswa (xlsx), join ke laporan R-5401, rekap Excel (Sesuai saja)
 requirements.txt  # Flask, openpyxl, gunicorn
 Procfile          # start command untuk platform berbasis Procfile
 railway.json      # start command untuk Railway
