@@ -215,19 +215,43 @@ def dl_zip(token):
     return _send(entry["zip"] if entry else None)
 
 
-# ---------- menu: rekap pembayaran R-5401 vs master siswa (hanya Sesuai) ----------
-@app.route("/rekap", methods=["GET"])
-def rekap():
-    return render_template_string(REKAP_PAGE, result=None, token=None, error=None, active="rekap")
+# ---------- menu: validasi pembayaran R-5401 vs master siswa (SD & SMP) ----------
+# Beda SD vs SMP hanya pada cara mencocokkan No. Pelanggan (laporan) -> NO VA (master):
+#   SD  : No. Pelanggan sudah = NO VA penuh.
+#   SMP : NO VA = kode sekolah + No. Pelanggan (mis. 63713 + 0318 = 637130318).
+LEVELS = {
+    "sd": {
+        "nama": "SD",
+        "desc": ("Pencocokan tiap transaksi: <strong>No. Pelanggan (laporan) = NO VA (master)</strong> "
+                 "secara langsung."),
+    },
+    "smp": {
+        "nama": "SMP",
+        "desc": ("Pencocokan tiap transaksi: <strong>NO VA = kode sekolah + No. Pelanggan</strong> "
+                 "(mis. 63713 + 0318 = 637130318), karena laporan SMP memakai kode pelanggan pendek."),
+    },
+}
 
 
-@app.route("/rekap/proses", methods=["POST"])
-def rekap_proses():
+@app.route("/validasi/<level>", methods=["GET"])
+def validasi(level):
+    if level not in LEVELS:
+        abort(404)
+    return render_template_string(REKAP_PAGE, level=level, cfg=LEVELS[level],
+                                  result=None, token=None, error=None, active="validasi_" + level)
+
+
+@app.route("/validasi/<level>/proses", methods=["POST"])
+def validasi_proses(level):
+    if level not in LEVELS:
+        abort(404)
+    cfg = LEVELS[level]
     f_master = request.files.get("master")
     f_laporan = request.files.get("laporan")
 
     def _err(msg):
-        return render_template_string(REKAP_PAGE, result=None, token=None, error=msg, active="rekap")
+        return render_template_string(REKAP_PAGE, level=level, cfg=cfg,
+                                      result=None, token=None, error=msg, active="validasi_" + level)
 
     if not f_master or not f_master.filename or not f_laporan or not f_laporan.filename:
         return _err("Mohon upload kedua file: master siswa (.xlsx) dan laporan harian R-5401 (.txt).")
@@ -249,7 +273,7 @@ def rekap_proses():
         return _err("Tidak ada baris transaksi terbaca dari file laporan. Pastikan ini file laporan "
                     "R-5401 dengan format lebar-tetap yang benar.")
 
-    rows = reconcile_pembayaran(report_rows, master)
+    rows = reconcile_pembayaran(report_rows, master, meta.get("kode"), level=level)
     shown = [r for r in rows if r["status"] == "Sesuai"]
 
     preview = [{
@@ -261,7 +285,7 @@ def rekap_proses():
     } for r in shown[:PREVIEW_LIMIT]]
 
     tgl = (meta.get("tanggal_label") or "").replace("/", "")
-    dname = f"Rekap_Sesuai_R-5401_{meta.get('kode') or 'NA'}_{tgl or 'NA'}.xlsx"
+    dname = f"Validasi_{cfg['nama']}_Sesuai_R-5401_{meta.get('kode') or 'NA'}_{tgl or 'NA'}.xlsx"
     xbytes = wb_to_bytes(build_recon_workbook(rows, meta, only_sesuai=True))
     token = _store({"rekap": (dname, xbytes)})
 
@@ -273,7 +297,14 @@ def rekap_proses():
         "n_unmatched": sum(1 for r in rows if not r["matched"]),
         "preview": preview, "preview_more": max(0, len(shown) - len(preview)),
     }
-    return render_template_string(REKAP_PAGE, result=result, token=token, error=None, active="rekap")
+    return render_template_string(REKAP_PAGE, level=level, cfg=cfg,
+                                  result=result, token=token, error=None, active="validasi_" + level)
+
+
+@app.route("/rekap")
+def rekap_redirect():
+    # kompat lama: menu 2 dulu bernama /rekap, kini "Data Validasi SD"
+    return redirect(url_for("validasi", level="sd"))
 
 
 @app.route("/dl/<token>/rekap")
@@ -372,7 +403,8 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <div class="nav">
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
-    <a href="{{ url_for('rekap') }}" class="{{ 'active' if active=='rekap' else '' }}">Rekap vs Master Siswa</a>
+    <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
+    <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -485,22 +517,22 @@ REKAP_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rekap Pembayaran vs Master Siswa</title>
+<title>Data Validasi {{ cfg.nama }} &mdash; R-5401 vs Master Siswa</title>
 <style>""" + STYLE + """</style>
 </head>
 <body>
 <div class="wrap">
   <div class="nav">
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
-    <a href="{{ url_for('rekap') }}" class="{{ 'active' if active=='rekap' else '' }}">Rekap vs Master Siswa</a>
+    <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
+    <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
   </div>
-  <h1>&#128203; Rekap Pembayaran vs Master Siswa</h1>
-  <p class="sub">Upload <strong>master siswa</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN, TABUNGAN) dan
-     <strong>laporan harian R-5401</strong> (.txt lebar-tetap) untuk mencocokkan tiap transaksi
-     (No. Pelanggan = NO VA) ke tagihannya. Hasil Excel hanya berisi transaksi berstatus
-     <strong>Sesuai</strong> (Nilai Bayar = Total Tagihan).</p>
+  <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
+  <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN,
+     TABUNGAN) dan <strong>laporan harian R-5401</strong> (.txt lebar-tetap). {{ cfg.desc|safe }}
+     Hasil Excel hanya berisi transaksi berstatus <strong>Sesuai</strong> (Nilai Bayar = Total Tagihan).</p>
 
-  <form class="up" method="post" action="{{ url_for('rekap_proses') }}" enctype="multipart/form-data">
+  <form class="up" method="post" action="{{ url_for('validasi_proses', level=level) }}" enctype="multipart/form-data">
     <div class="field">
       <label class="lbl" for="master">Master siswa (.xlsx)</label>
       <input id="master" type="file" name="master" accept=".xlsx" required>
@@ -567,9 +599,8 @@ REKAP_PAGE = """<!doctype html>
   {% endif %}
 
   <hr class="sep">
-  <p class="foot">Catatan: pencocokan berdasarkan No. Pelanggan (laporan) = NO VA (master siswa).
-     Hanya transaksi berstatus Sesuai yang masuk file Excel; sheet Ringkasan tetap merangkum
-     seluruh transaksi termasuk Kurang/Lebih/tanpa data master.</p>
+  <p class="foot">Catatan: hanya transaksi berstatus Sesuai yang masuk file Excel; sheet Ringkasan
+     tetap merangkum seluruh transaksi termasuk Kurang/Lebih/tanpa data master.</p>
 </div>
 </body>
 </html>"""

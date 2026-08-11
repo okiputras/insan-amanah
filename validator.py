@@ -64,19 +64,36 @@ STATUS_KURANG = "Kurang"
 STATUS_LEBIH = "Lebih"
 
 
-def reconcile_pembayaran(report_rows, master):
+def _resolve_no_va(cust, kode, level):
+    """Tentukan NO VA (kunci master) dari 'No. Pelanggan' laporan.
+
+    - level 'sd' : No. Pelanggan pada laporan SUDAH berupa NO VA penuh -> dipakai langsung.
+    - level 'smp': laporan hanya memuat kode pelanggan pendek (mis. '0318'); NO VA penuh
+      dibentuk dari kode sekolah + kode pelanggan 4 digit (mis. 63713 + 0318 = 637130318).
+    """
+    c = str(cust or "").strip()
+    if not c.isdigit():
+        return None
+    if level == "smp":
+        k = str(kode or "").strip()
+        if not k.isdigit():
+            return None
+        return int(k + c.zfill(4))
+    return int(c)
+
+
+def reconcile_pembayaran(report_rows, master, kode=None, level="sd"):
     """Join baris laporan R-5401 (dari parser.parse_report) ke master siswa.
 
     report_rows: [no, no_pelanggan, nama, nilai, tgl(date), waktu(time), jam(int), lokasi, ket1, ket2]
+    kode : kode sekolah dari meta laporan (dipakai saat level='smp' untuk membentuk NO VA penuh).
+    level: 'sd' (No. Pelanggan = NO VA langsung) atau 'smp' (NO VA = kode + No. Pelanggan).
     -> list of dict siap-lapor (BPP/Kegiatan/Tabungan/Total Tagihan/Nilai Bayar/Selisih/Status).
     """
     out = []
     for row in report_rows:
         no, cust, nama_rpt, nilai, tgl, waktu, jam, lok, k1, k2 = row
-        try:
-            no_va = int(cust)
-        except (TypeError, ValueError):
-            no_va = None
+        no_va = _resolve_no_va(cust, kode, level)
         m = master.get(no_va) if no_va is not None else None
         bpp = m["BPP"] if m else 0
         kegiatan = m["KEGIATAN"] if m else 0
