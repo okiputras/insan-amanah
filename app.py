@@ -16,8 +16,20 @@ from flask import (
     Flask, request, render_template_string, send_file, abort, redirect, url_for,
 )
 
+import json
+
 from parser import parse_report, build_workbook, build_combined_workbook
 from validator import parse_master_siswa, reconcile_pembayaran, build_recon_workbook
+
+# Menu Tabungan SMP (Google Sheets via gspread). Soft-import supaya menu lain
+# tetap jalan meski gspread belum terpasang.
+try:
+    import tab_config as TC
+    import tab_sheet as TS
+    _TAB_IMPORT_ERR = None
+except Exception as _e:            # noqa
+    TC = TS = None
+    _TAB_IMPORT_ERR = str(_e)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
@@ -313,6 +325,134 @@ def dl_rekap(token):
     return _send(entry["rekap"] if entry else None)
 
 
+# ---------- menu: Tabungan SMP (Google Sheets) ----------
+def _tab_table(ws, year):
+    """Susun tabel tampilan dari isi tab: header gabungan bulan·sub + baris data."""
+    grid = ws.get_all_values()
+    if len(grid) < TC.FIRST_DATA_ROW:
+        return None
+    month_row = grid[TC.HEADER_MONTH_ROW - 1]
+    sub_row = grid[TC.HEADER_SUB_ROW - 1]
+    headers = ["NO", "INDUK", "NAMA", "SALDO AWAL"]
+    cur = ""
+    for c in range(TC.N_FIXED, TC.total_cols(year)):
+        if c < len(month_row) and month_row[c].strip():
+            cur = month_row[c].strip()
+        sub = sub_row[c].strip() if c < len(sub_row) else ""
+        short = cur.split()[0][:3].title() if cur else ""
+        headers.append(f"{short}·{sub}")
+    rows = []
+    for r in grid[TC.FIRST_DATA_ROW - 1:]:
+        r = list(r[:len(headers)]) + [""] * (len(headers) - len(r))
+        if not str(r[1]).strip():
+            continue
+        rows.append(r)
+    # total saldo (kolom SALDO terakhir)
+    last_saldo_idx = max((i for i, h in enumerate(headers) if h.endswith("SALDO")), default=None)
+    total = 0
+    if last_saldo_idx is not None:
+        for r in rows:
+            digits = "".join(ch for ch in str(r[last_saldo_idx]) if ch.isdigit() or ch == "-")
+            try:
+                total += int(digits) if digits not in ("", "-") else 0
+            except ValueError:
+                pass
+    return {"headers": headers, "rows": rows, "n": len(rows),
+            "total_saldo": rupiah(total),
+            "last_month": headers[last_saldo_idx].split("·")[0] if last_saldo_idx else ""}
+
+
+def _tab_ctx(kelas, year, msg=None, msgtype="info"):
+    ctx = {"active": "tabungan", "kelas": kelas or TC and TC.KELAS_LIST[0],
+           "kelas_list": TC.KELAS_LIST if TC else [7, 8, 9], "years": [], "year": year,
+           "tab_title": None, "months": [], "roster": [], "roster_json": "{}",
+           "table": None, "error": None, "msg": msg, "msgtype": msgtype,
+           "academic": None, "next_year": None,
+           "sa_email": TC.SERVICE_ACCOUNT_EMAIL if TC else "",
+           "sheet_url": f"https://docs.google.com/spreadsheets/d/{TC.SPREADSHEET_ID}" if TC else "#",
+           "today": datetime.now().strftime("%Y-%m-%d")}
+    if TS is None:
+        ctx["error"] = "Modul Tabungan belum siap: " + (_TAB_IMPORT_ERR or "gspread belum terpasang.")
+        return ctx
+    try:
+        book = TS.open_book()
+    except Exception as e:  # noqa (PermissionError / kredensial / dll.)
+        ctx["error"] = str(e)
+        return ctx
+    years = TS.list_years(book)
+    if not years:
+        ctx["error"] = "Belum ada tab data di spreadsheet. Jalankan tab_build.py dulu."
+        return ctx
+    if year not in years:
+        year = years[-1]
+    ctx.update(year=year, years=years, next_year=max(years) + 1,
+               academic=TC.academic_label(year), tab_title=TC.tab_name(kelas, year))
+    ws = book.worksheet(TC.tab_name(kelas, year))
+    roster = TS.read_roster_from_tab(ws)
+    ctx["roster"] = roster
+    ctx["roster_json"] = json.dumps({r["induk"]: r["nama"] for r in roster})
+    ctx["months"] = [(m, TC.month_label(m, year)) for m in TC.months_for_year(year)]
+    ctx["table"] = _tab_table(ws, year)
+    return ctx
+
+
+@app.route("/tabungan")
+def tabungan():
+    kelas = request.args.get("kelas", type=int) or (TC.KELAS_LIST[0] if TC else 7)
+    year = request.args.get("year", type=int)
+    ctx = _tab_ctx(kelas, year, msg=request.args.get("msg"),
+                   msgtype=request.args.get("t", "info"))
+    return render_template_string(TABUNGAN_PAGE, **ctx)
+
+
+@app.route("/tabungan/simpan", methods=["POST"])
+def tabungan_simpan():
+    kelas = request.form.get("kelas", type=int)
+    year = request.form.get("year", type=int)
+    induk = (request.form.get("induk") or "").strip()
+    jenis = request.form.get("jenis", "PENYETORAN")
+    month_num = request.form.get("bulan", type=int)
+    tanggal = request.form.get("tanggal")
+    jumlah = request.form.get("jumlah", type=int)
+    try:
+        if TS is None:
+            raise RuntimeError("Modul Tabungan belum siap.")
+        book = TS.open_book()
+        ws = book.worksheet(TC.tab_name(kelas, year))
+        roster = TS.read_roster_from_tab(ws)
+        info = next((r for r in roster if r["induk"] == induk), None)
+        if info is None:
+            raise ValueError(f"No Induk '{induk}' tidak ditemukan di {TC.tab_name(kelas, year)}.")
+        if not jumlah or jumlah <= 0:
+            raise ValueError("Jumlah harus lebih dari 0.")
+        tgl = (datetime.strptime(tanggal, "%Y-%m-%d").strftime("%d/%m/%Y")
+               if tanggal else datetime.now().strftime("%d/%m/%Y"))
+        new_saldo = TS.write_transaction(ws, info["row"], year, month_num, jenis, tgl, jumlah)
+        msg = (f"✓ {jenis.title()} {rupiah(jumlah)} — {info['nama']} "
+               f"({TC.month_label(month_num, year)}). Saldo baru: {rupiah(new_saldo)}.")
+        return redirect(url_for("tabungan", kelas=kelas, year=year, msg=msg, t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for("tabungan", kelas=kelas, year=year, msg=str(e), t="err"), code=303)
+
+
+@app.route("/tabungan/tahun-baru", methods=["POST"])
+def tabungan_tahun_baru():
+    try:
+        if TS is None:
+            raise RuntimeError("Modul Tabungan belum siap.")
+        book = TS.open_book()
+        years = TS.list_years(book)
+        ny = max(years) + 1
+        for k in TC.KELAS_LIST:
+            prev = book.worksheet(TC.tab_name(k, ny - 1))
+            carried = TS.last_saldo_of_year(prev, ny - 1)
+            TS.build_tab(book, k, ny, carried)
+        return redirect(url_for("tabungan", year=ny,
+                                msg=f"✓ Tab T.A. {TC.academic_label(ny)} dibuat.", t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for("tabungan", msg=str(e), t="err"), code=303)
+
+
 @app.route("/health")
 def health():
     return "ok", 200
@@ -405,6 +545,7 @@ PAGE = """<!doctype html>
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
     <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -526,6 +667,7 @@ REKAP_PAGE = """<!doctype html>
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
     <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
   </div>
   <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
   <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN,
@@ -602,6 +744,173 @@ REKAP_PAGE = """<!doctype html>
   <p class="foot">Catatan: hanya transaksi berstatus Sesuai yang masuk file Excel; sheet Ringkasan
      tetap merangkum seluruh transaksi termasuk Kurang/Lebih/tanpa data master.</p>
 </div>
+</body>
+</html>"""
+
+
+TAB_EXTRA = """
+  .tab-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:640px){ .tab-grid{ grid-template-columns:1fr; } }
+  .in { width:100%; padding:11px 12px; border:1px solid #c4d2d7; border-radius:9px;
+        background:#fff; font-size:.95rem; font-family:inherit; }
+  .in:focus { outline:2px solid var(--teal2); border-color:var(--teal2); }
+  .in[readonly]{ background:#eef3f5; color:#5c6b70; }
+  .radios { display:flex; gap:20px; align-items:center; padding:6px 0; }
+  .radios label{ font-weight:600; display:flex; gap:6px; align-items:center; cursor:pointer; }
+  .filterbar { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; background:#fff;
+               border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:18px; }
+  .filterbar .fld{ display:flex; flex-direction:column; gap:5px; }
+  .filterbar .fld .lbl{ margin:0; font-size:.78rem; text-transform:uppercase; letter-spacing:.03em; }
+  .search { padding:9px 12px; border:1px solid #c4d2d7; border-radius:9px; font-size:.9rem;
+            width:280px; max-width:100%; margin-bottom:10px; }
+  table.data th:nth-child(3), table.data td:nth-child(3){ text-align:left; white-space:nowrap; }
+  .alert.ok { background:var(--okbg); color:var(--ok); }
+  .hint{ color:#6b7a80; font-size:.82rem; margin:4px 0 0; }
+"""
+
+TABUNGAN_PAGE = """<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tabungan SMP Insan Amanah</title>
+<style>""" + STYLE + TAB_EXTRA + """</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav">
+    <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
+    <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
+    <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
+  </div>
+  <h1>&#127974; Tabungan SMP Insan Amanah</h1>
+  <p class="sub">Catat penyetoran/penarikan tabungan siswa langsung ke Google Sheet.
+     Saldo dihitung otomatis (saldo bulan lalu + setor &minus; tarik).</p>
+
+  {% if msg %}<div class="alert {{ msgtype }}" style="margin-bottom:16px;">{{ msg }}</div>{% endif %}
+
+  {% if error %}
+    <div class="alert err">&#9888; {{ error }}</div>
+    {% if sa_email and 'share' in error|lower %}
+      <p class="hint">Bagikan spreadsheet ke <strong>{{ sa_email }}</strong> sebagai <strong>Editor</strong>,
+         lalu <a href="{{ url_for('tabungan') }}">muat ulang</a>.</p>
+    {% endif %}
+  {% else %}
+
+    <form class="filterbar" method="get" action="{{ url_for('tabungan') }}">
+      <div class="fld">
+        <label class="lbl">Kelas</label>
+        <select class="in" name="kelas" onchange="this.form.submit()">
+          {% for k in kelas_list %}<option value="{{ k }}" {{ 'selected' if k==kelas else '' }}>Kelas {{ k }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="fld">
+        <label class="lbl">Tahun Ajaran</label>
+        <select class="in" name="year" onchange="this.form.submit()">
+          {% for y in years %}<option value="{{ y }}" {{ 'selected' if y==year else '' }}>{{ y }}/{{ y+1 }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="fld"><a class="btn ghost" href="{{ sheet_url }}" target="_blank" rel="noopener">&#128196; Buka Google Sheet</a></div>
+    </form>
+
+    <form class="up" method="post" action="{{ url_for('tabungan_simpan') }}">
+      <input type="hidden" name="kelas" value="{{ kelas }}">
+      <input type="hidden" name="year" value="{{ year }}">
+      <div class="tab-grid">
+        <div>
+          <div class="field">
+            <label class="lbl" for="induk">1 &middot; No Induk (ketik / pilih)</label>
+            <input class="in" id="induk" name="induk" list="siswa" autocomplete="off"
+                   placeholder="mis. 0344" oninput="isiNama()" required>
+            <datalist id="siswa">
+              {% for r in roster %}<option value="{{ r.induk }}">{{ r.nama }}</option>{% endfor %}
+            </datalist>
+            <p class="hint">{{ roster|length }} siswa di {{ tab_title }}</p>
+          </div>
+          <div class="field">
+            <label class="lbl" for="nama">Nama Lengkap</label>
+            <input class="in" id="nama" readonly placeholder="otomatis dari No Induk">
+          </div>
+        </div>
+        <div>
+          <div class="field">
+            <label class="lbl">2 &middot; Jenis</label>
+            <div class="radios">
+              <label><input type="radio" name="jenis" value="PENYETORAN" checked onchange="setTgl()"> Penyetoran</label>
+              <label><input type="radio" name="jenis" value="PENARIKAN" onchange="setTgl()"> Penarikan</label>
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="bulan">3 &middot; Bulan (boleh acak)</label>
+            <select class="in" id="bulan" name="bulan">
+              {% for m,lab in months %}<option value="{{ m }}">{{ lab }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label class="lbl" for="tanggal" id="tglLbl">Tanggal Penyetoran</label>
+            <input class="in" type="date" id="tanggal" name="tanggal" value="{{ today }}">
+          </div>
+          <div class="field">
+            <label class="lbl" for="jumlah">Jumlah (Rp)</label>
+            <input class="in" type="number" id="jumlah" name="jumlah" min="0" step="1000" placeholder="0" required>
+          </div>
+        </div>
+      </div>
+      <button class="btn primary" type="submit">&#128190; Simpan (saldo terisi otomatis)</button>
+    </form>
+
+    {% if table %}
+    <div class="combined" style="margin-top:22px;">
+      <h2>&#128202; {{ tab_title }}</h2>
+      <p class="sub" style="margin:0 0 10px;">{{ table.n }} siswa &bull;
+         Total Saldo ({{ table.last_month }}): <strong>{{ table.total_saldo }}</strong></p>
+      <input class="search" id="cari" placeholder="&#128269; Cari induk / nama…" onkeyup="filterTabel()">
+      <div class="tblwrap" style="max-height:520px; overflow:auto;">
+        <table class="data" id="dataTabungan">
+          <thead><tr>{% for h in table.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+          <tbody>
+            {% for row in table.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('tabungan_tahun_baru') }}" style="margin-top:18px;"
+          onsubmit="return confirm('Buat tab T.A. {{ next_year }}/{{ next_year+1 }} untuk semua kelas? Saldo awal = saldo Juni tahun ini.');">
+      <button class="btn ghost" type="submit">&#10133; Buat Tahun Ajaran {{ next_year }}/{{ next_year+1 }}</button>
+    </form>
+
+  {% endif %}
+
+  <hr class="sep">
+  <p class="foot">Data tersimpan di Google Sheet (sumber tunggal). Kolom SALDO memakai formula
+     berjalan; simpan ulang pada siswa &amp; bulan yang sama untuk mengedit.</p>
+</div>
+
+<script>
+  const NAMA = {{ roster_json|safe }};
+  function isiNama(){
+    var v = document.getElementById('induk').value.trim();
+    document.getElementById('nama').value = NAMA[v] || '';
+  }
+  function setTgl(){
+    var p = document.querySelector('input[name=jenis]:checked').value;
+    document.getElementById('tglLbl').textContent =
+      (p === 'PENYETORAN') ? 'Tanggal Penyetoran' : 'Tanggal Penarikan';
+  }
+  function filterTabel(){
+    var q = document.getElementById('cari').value.toLowerCase();
+    var rows = document.querySelectorAll('#dataTabungan tbody tr');
+    rows.forEach(function(tr){
+      var t = (tr.cells.length > 2)
+        ? (tr.cells[1].textContent + ' ' + tr.cells[2].textContent).toLowerCase()
+        : tr.textContent.toLowerCase();
+      tr.style.display = t.indexOf(q) > -1 ? '' : 'none';
+    });
+  }
+</script>
 </body>
 </html>"""
 
