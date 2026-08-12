@@ -6,6 +6,8 @@ Tanpa Streamlit / numpy / pandas / pyarrow — hanya Flask + openpyxl, memakai
 HTTP request/response biasa (tanpa WebSocket) supaya ringan & stabil di Railway.
 """
 import io
+import os
+import hmac
 import time
 import zipfile
 import secrets
@@ -14,6 +16,7 @@ from datetime import datetime
 
 from flask import (
     Flask, request, render_template_string, send_file, abort, redirect, url_for,
+    Response,
 )
 
 import json
@@ -34,6 +37,25 @@ except Exception as _e:            # noqa
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
 PREVIEW_LIMIT = 100                                    # baris maksimum di tabel preview
+
+# ---- login sederhana (HTTP Basic Auth) ----
+# Kredensial hardcoded; bisa ditimpa via env AUTH_USER / AUTH_PASS tanpa edit kode.
+AUTH_USER = os.environ.get("AUTH_USER", "evit")
+AUTH_PASS = os.environ.get("AUTH_PASS", "evitcantik")
+
+
+@app.before_request
+def _require_login():
+    if request.path == "/health":          # dibiarkan terbuka untuk healthcheck Railway
+        return None
+    auth = request.authorization
+    if (auth and hmac.compare_digest(auth.username or "", AUTH_USER)
+            and hmac.compare_digest(auth.password or "", AUTH_PASS)):
+        return None
+    return Response(
+        "Perlu login untuk mengakses dashboard.", 401,
+        {"WWW-Authenticate": 'Basic realm="Dashboard Insan Amanah"'},
+    )
 
 # ---- penyimpanan hasil sementara (in-memory, dibatasi TTL & jumlah) ----
 # Menyimpan byte Excel hasil parsing supaya link unduh tidak perlu mem-parsing ulang.
