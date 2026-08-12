@@ -86,8 +86,9 @@ def parse_bca_va(text):
     """Parser 'Laporan BCA Virtual Account' -> (meta, rows) dengan struktur
     identik parse_report, agar reconcile_pembayaran bisa dipakai apa adanya.
 
-    - No. Virtual Account '63713-0388' -> cust = '0388' (bagian setelah '-'),
-      sehingga reconcile SMP (kode + cust) menghasilkan NO VA penuh '637130388'.
+    - No. Virtual Account '63713-0388' -> cust = '637130388' (VA penuh, tanpa '-').
+      reconcile mengenali cust yang sudah berupa VA penuh (lihat _resolve_no_va),
+      jadi cocok untuk level 'sd' maupun 'smp'.
     - nilai bayar = Total Transfer (uang yang benar-benar ditransfer).
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -110,8 +111,7 @@ def parse_bca_va(text):
             continue
         try:
             no = int(m.group(1))
-            va = m.group(2)
-            cust = va.split("-", 1)[1] if "-" in va else va
+            cust = re.sub(r"\D", "", m.group(2))          # VA penuh, hanya digit
             nama = m.group(4).strip()
             transfer = float(m.group(6).replace(",", ""))     # Total Transfer = nilai bayar
             d, mo, y = m.group(7).split("/")

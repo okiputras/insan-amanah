@@ -78,6 +78,10 @@ def _resolve_no_va(cust, kode, level):
         k = str(kode or "").strip()
         if not k.isdigit():
             return None
+        # Bila cust sudah berupa NO VA penuh (diawali kode sekolah, mis. dari laporan
+        # BCA VA '63713-0388' -> '637130388'), pakai langsung; jangan diprefix lagi.
+        if len(c) > len(k) and c.startswith(k):
+            return int(c)
         return int(k + c.zfill(4))
     return int(c)
 
