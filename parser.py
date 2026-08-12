@@ -74,6 +74,71 @@ def parse_report(text):
     return meta, rows
 
 
+# ---- Laporan BCA Virtual Account (format lain, kolom bebas-spasi) ----
+_BCA_ROW = re.compile(
+    r"^\s*(\d+)\s+(\d[\d-]*)\s+(\S+)\s+(.+?)\s+IDR\s+"
+    r"([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+"
+    r"(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\s*(.*)$"
+)
+
+
+def parse_bca_va(text):
+    """Parser 'Laporan BCA Virtual Account' -> (meta, rows) dengan struktur
+    identik parse_report, agar reconcile_pembayaran bisa dipakai apa adanya.
+
+    - No. Virtual Account '63713-0388' -> cust = '0388' (bagian setelah '-'),
+      sehingga reconcile SMP (kode + cust) menghasilkan NO VA penuh '637130388'.
+    - nilai bayar = Total Transfer (uang yang benar-benar ditransfer).
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    meta = {"kode": "", "nama_pt": "", "cabang": "", "tanggal_label": "",
+            "footer_total": None, "footer_count": None}
+    for ln in lines:
+        if "Kode Perusahaan" in ln:
+            m = re.search(r"Kode Perusahaan\s*:\s*(\d+)", ln)
+            if m:
+                meta["kode"] = m.group(1)
+        elif "Nama Perusahaan" in ln:
+            m = re.search(r"Nama Perusahaan\s*:\s*(.+?)\s*$", ln)
+            if m:
+                meta["nama_pt"] = m.group(1).strip()
+
+    rows = []
+    for ln in lines:
+        m = _BCA_ROW.match(ln)
+        if not m:
+            continue
+        try:
+            no = int(m.group(1))
+            va = m.group(2)
+            cust = va.split("-", 1)[1] if "-" in va else va
+            nama = m.group(4).strip()
+            transfer = float(m.group(6).replace(",", ""))     # Total Transfer = nilai bayar
+            d, mo, y = m.group(7).split("/")
+            tgl = datetime(int(y), int(mo), int(d)).date()
+            hh, mm, ss = m.group(8).split(":")
+            waktu = dtime(int(hh), int(mm), int(ss))
+            berita = m.group(9).strip()
+            parts = re.split(r"\s{2,}", berita) if berita else []
+            k1 = parts[0] if parts else ""
+            k2 = parts[1] if len(parts) > 1 else ""
+        except (ValueError, IndexError):
+            continue
+        rows.append([no, cust, nama, transfer, tgl, waktu, int(hh), "", k1, k2])
+
+    if rows and not meta["tanggal_label"]:
+        meta["tanggal_label"] = rows[0][4].strftime("%d/%m/%Y")
+    return meta, rows
+
+
+def parse_laporan(text):
+    """Auto-deteksi format laporan -> (meta, rows). Mendukung R-5401 & BCA VA."""
+    head = "\n".join(text.splitlines()[:8]).upper()
+    if "VIRTUAL ACCOUNT" in head:
+        return parse_bca_va(text)
+    return parse_report(text)
+
+
 # ---------- styling ----------
 _A = "Arial"
 _HFILL = PatternFill("solid", fgColor="1F4E5F")

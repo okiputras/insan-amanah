@@ -21,7 +21,7 @@ from flask import (
 
 import json
 
-from parser import parse_report, build_workbook, build_combined_workbook
+from parser import parse_report, parse_laporan, build_workbook, build_combined_workbook
 from validator import parse_master_siswa, reconcile_pembayaran, build_recon_workbook
 
 # Menu Tabungan SMP (Google Sheets via gspread). Soft-import supaya menu lain
@@ -302,10 +302,10 @@ def validasi_proses(level):
     if not master:
         return _err("Tidak ada baris siswa valid yang terbaca dari file master siswa.")
 
-    meta, report_rows = parse_report(_decode(f_laporan.read()))
+    meta, report_rows = parse_laporan(_decode(f_laporan.read()))
     if not report_rows:
         return _err("Tidak ada baris transaksi terbaca dari file laporan. Pastikan ini file laporan "
-                    "R-5401 dengan format lebar-tetap yang benar.")
+                    "R-5401 (format lebar-tetap) atau Laporan BCA Virtual Account yang benar.")
 
     rows = reconcile_pembayaran(report_rows, master, meta.get("kode"), level=level)
     shown = [r for r in rows if r["status"] == "Sesuai"]
