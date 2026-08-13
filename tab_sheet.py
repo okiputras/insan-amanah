@@ -51,12 +51,13 @@ def get_client():
     return gspread.authorize(_load_creds())
 
 
-def open_book(client=None):
+def open_book(spreadsheet_id=None, client=None):
     client = client or get_client()
+    sid = spreadsheet_id or C.SPREADSHEET_ID
     msg = ("Service account belum punya akses ke spreadsheet.\n"
            "Share spreadsheet ke (sebagai Editor): " + C.SERVICE_ACCOUNT_EMAIL)
     try:
-        return client.open_by_key(C.SPREADSHEET_ID)
+        return client.open_by_key(sid)
     except PermissionError as e:
         raise PermissionError(msg) from e
     except gspread.exceptions.APIError as e:
@@ -78,9 +79,9 @@ WHITE = _rgb(255, 255, 255)
 
 
 # ---------------------------------------------------------------- build
-def build_tab(book, kelas, year, roster):
-    """Buat/timpa tab 'SMP <kelas> <year>'. roster: list of (induk, nama, saldo_awal)."""
-    title = C.tab_name(kelas, year)
+def build_tab(book, kelas, year, roster, jenjang="SMP"):
+    """Buat/timpa tab '<jenjang> <kelas> <year>'. roster: list of (induk, nama, saldo_awal)."""
+    title = C.tab_name(kelas, year, jenjang)
     months = C.months_for_year(year)
     n_cols = C.total_cols(year)
     n_rows = C.FIRST_DATA_ROW + len(roster) + 5
@@ -97,7 +98,7 @@ def build_tab(book, kelas, year, roster):
     def setv(r, c, v):
         grid[r - 1][c - 1] = v
 
-    setv(1, 1, f"TABUNGAN SMP INSAN AMANAH  —  KELAS {kelas}  —  T.A. {C.academic_label(year)}")
+    setv(1, 1, f"TABUNGAN {jenjang} INSAN AMANAH  —  KELAS {kelas}  —  T.A. {C.academic_label(year)}")
     for i, h in enumerate(C.FIXED_HEADERS, start=1):
         setv(C.HEADER_MONTH_ROW, i, h)
     for pos, m in enumerate(months):
@@ -213,11 +214,11 @@ def read_roster_from_tab(ws):
     return out
 
 
-def list_years(book):
+def list_years(book, jenjang="SMP"):
     years = set()
     for ws in book.worksheets():
         parts = ws.title.split()
-        if len(parts) == 3 and parts[0] == "SMP":
+        if len(parts) == 3 and parts[0] == jenjang:
             try:
                 years.add(int(parts[2]))
             except ValueError:

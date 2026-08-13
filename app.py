@@ -384,32 +384,52 @@ def _tab_table(ws, year):
             "last_month": headers[last_saldo_idx].split("·")[0] if last_saldo_idx else ""}
 
 
-def _tab_ctx(kelas, year, msg=None, msgtype="info"):
-    ctx = {"active": "tabungan", "kelas": kelas or TC and TC.KELAS_LIST[0],
-           "kelas_list": TC.KELAS_LIST if TC else [7, 8, 9], "years": [], "year": year,
+# Profil menu tabungan per jenjang (endpoint & label untuk template bersama)
+_TAB_MENU = {
+    "smp": {"jenjang": "SMP", "label": "Tabungan SMP", "active": "tab_smp",
+            "ep_self": "tabungan", "ep_simpan": "tabungan_simpan", "ep_tahun": "tabungan_tahun_baru"},
+    "sd": {"jenjang": "SD", "label": "Tabungan SD", "active": "tab_sd",
+           "ep_self": "tabungan_sd", "ep_simpan": "tabungan_sd_simpan", "ep_tahun": "tabungan_sd_tahun_baru"},
+}
+
+
+def _profile(pkey):
+    p = dict(_TAB_MENU[pkey])
+    prof = TC.PROFILES[pkey] if TC else {}
+    p["kelas"] = prof.get("kelas", [7, 8, 9] if pkey == "smp" else [1, 2, 3, 4, 5, 6])
+    p["sid"] = prof.get("spreadsheet_id", "")
+    return p
+
+
+def _tab_ctx(pkey, kelas, year, msg=None, msgtype="info"):
+    p = _profile(pkey)
+    kelas = kelas or p["kelas"][0]
+    ctx = {"active": p["active"], "jenjang": p["jenjang"], "label": p["label"],
+           "ep_self": p["ep_self"], "ep_simpan": p["ep_simpan"], "ep_tahun": p["ep_tahun"],
+           "kelas": kelas or p["kelas"][0], "kelas_list": p["kelas"], "years": [], "year": year,
            "tab_title": None, "months": [], "roster": [], "roster_json": "{}",
            "table": None, "error": None, "msg": msg, "msgtype": msgtype,
            "academic": None, "next_year": None,
            "sa_email": TC.SERVICE_ACCOUNT_EMAIL if TC else "",
-           "sheet_url": f"https://docs.google.com/spreadsheets/d/{TC.SPREADSHEET_ID}" if TC else "#",
+           "sheet_url": f"https://docs.google.com/spreadsheets/d/{p['sid']}" if p["sid"] else "#",
            "today": datetime.now().strftime("%Y-%m-%d")}
     if TS is None:
         ctx["error"] = "Modul Tabungan belum siap: " + (_TAB_IMPORT_ERR or "gspread belum terpasang.")
         return ctx
     try:
-        book = TS.open_book()
+        book = TS.open_book(p["sid"])
     except Exception as e:  # noqa (PermissionError / kredensial / dll.)
         ctx["error"] = str(e)
         return ctx
-    years = TS.list_years(book)
+    years = TS.list_years(book, p["jenjang"])
     if not years:
-        ctx["error"] = "Belum ada tab data di spreadsheet. Jalankan tab_build.py dulu."
+        ctx["error"] = f"Belum ada tab data {p['jenjang']} di spreadsheet. Jalankan skrip build dulu."
         return ctx
     if year not in years:
         year = years[-1]
     ctx.update(year=year, years=years, next_year=max(years) + 1,
-               academic=TC.academic_label(year), tab_title=TC.tab_name(kelas, year))
-    ws = book.worksheet(TC.tab_name(kelas, year))
+               academic=TC.academic_label(year), tab_title=TC.tab_name(kelas, year, p["jenjang"]))
+    ws = book.worksheet(TC.tab_name(kelas, year, p["jenjang"]))
     roster = TS.read_roster_from_tab(ws)
     ctx["roster"] = roster
     ctx["roster_json"] = json.dumps({r["induk"]: r["nama"] for r in roster})
@@ -418,17 +438,14 @@ def _tab_ctx(kelas, year, msg=None, msgtype="info"):
     return ctx
 
 
-@app.route("/tabungan")
-def tabungan():
-    kelas = request.args.get("kelas", type=int) or (TC.KELAS_LIST[0] if TC else 7)
-    year = request.args.get("year", type=int)
-    ctx = _tab_ctx(kelas, year, msg=request.args.get("msg"),
-                   msgtype=request.args.get("t", "info"))
-    return render_template_string(TABUNGAN_PAGE, **ctx)
+def _tab_render(pkey):
+    return render_template_string(TABUNGAN_PAGE, **_tab_ctx(
+        pkey, request.args.get("kelas", type=int), request.args.get("year", type=int),
+        msg=request.args.get("msg"), msgtype=request.args.get("t", "info")))
 
 
-@app.route("/tabungan/simpan", methods=["POST"])
-def tabungan_simpan():
+def _tab_simpan(pkey):
+    p = _profile(pkey)
     kelas = request.form.get("kelas", type=int)
     year = request.form.get("year", type=int)
     induk = (request.form.get("induk") or "").strip()
@@ -439,12 +456,12 @@ def tabungan_simpan():
     try:
         if TS is None:
             raise RuntimeError("Modul Tabungan belum siap.")
-        book = TS.open_book()
-        ws = book.worksheet(TC.tab_name(kelas, year))
+        book = TS.open_book(p["sid"])
+        ws = book.worksheet(TC.tab_name(kelas, year, p["jenjang"]))
         roster = TS.read_roster_from_tab(ws)
         info = next((r for r in roster if r["induk"] == induk), None)
         if info is None:
-            raise ValueError(f"No Induk '{induk}' tidak ditemukan di {TC.tab_name(kelas, year)}.")
+            raise ValueError(f"No Induk '{induk}' tidak ditemukan di {TC.tab_name(kelas, year, p['jenjang'])}.")
         if not jumlah or jumlah <= 0:
             raise ValueError("Jumlah harus lebih dari 0.")
         tgl = (datetime.strptime(tanggal, "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -452,27 +469,57 @@ def tabungan_simpan():
         new_saldo = TS.write_transaction(ws, info["row"], year, month_num, jenis, tgl, jumlah)
         msg = (f"✓ {jenis.title()} {rupiah(jumlah)} — {info['nama']} "
                f"({TC.month_label(month_num, year)}). Saldo baru: {rupiah(new_saldo)}.")
-        return redirect(url_for("tabungan", kelas=kelas, year=year, msg=msg, t="ok"), code=303)
+        return redirect(url_for(p["ep_self"], kelas=kelas, year=year, msg=msg, t="ok"), code=303)
     except Exception as e:  # noqa
-        return redirect(url_for("tabungan", kelas=kelas, year=year, msg=str(e), t="err"), code=303)
+        return redirect(url_for(p["ep_self"], kelas=kelas, year=year, msg=str(e), t="err"), code=303)
+
+
+def _tab_tahun_baru(pkey):
+    p = _profile(pkey)
+    try:
+        if TS is None:
+            raise RuntimeError("Modul Tabungan belum siap.")
+        book = TS.open_book(p["sid"])
+        years = TS.list_years(book, p["jenjang"])
+        ny = max(years) + 1
+        for k in p["kelas"]:
+            prev = book.worksheet(TC.tab_name(k, ny - 1, p["jenjang"]))
+            carried = TS.last_saldo_of_year(prev, ny - 1)
+            TS.build_tab(book, k, ny, carried, p["jenjang"])
+        return redirect(url_for(p["ep_self"], year=ny,
+                                msg=f"✓ Tab T.A. {TC.academic_label(ny)} dibuat.", t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for(p["ep_self"], msg=str(e), t="err"), code=303)
+
+
+@app.route("/tabungan")
+def tabungan():
+    return _tab_render("smp")
+
+
+@app.route("/tabungan/simpan", methods=["POST"])
+def tabungan_simpan():
+    return _tab_simpan("smp")
 
 
 @app.route("/tabungan/tahun-baru", methods=["POST"])
 def tabungan_tahun_baru():
-    try:
-        if TS is None:
-            raise RuntimeError("Modul Tabungan belum siap.")
-        book = TS.open_book()
-        years = TS.list_years(book)
-        ny = max(years) + 1
-        for k in TC.KELAS_LIST:
-            prev = book.worksheet(TC.tab_name(k, ny - 1))
-            carried = TS.last_saldo_of_year(prev, ny - 1)
-            TS.build_tab(book, k, ny, carried)
-        return redirect(url_for("tabungan", year=ny,
-                                msg=f"✓ Tab T.A. {TC.academic_label(ny)} dibuat.", t="ok"), code=303)
-    except Exception as e:  # noqa
-        return redirect(url_for("tabungan", msg=str(e), t="err"), code=303)
+    return _tab_tahun_baru("smp")
+
+
+@app.route("/tabungan-sd")
+def tabungan_sd():
+    return _tab_render("sd")
+
+
+@app.route("/tabungan-sd/simpan", methods=["POST"])
+def tabungan_sd_simpan():
+    return _tab_simpan("sd")
+
+
+@app.route("/tabungan-sd/tahun-baru", methods=["POST"])
+def tabungan_sd_tahun_baru():
+    return _tab_tahun_baru("sd")
 
 
 @app.route("/health")
@@ -567,7 +614,8 @@ PAGE = """<!doctype html>
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
     <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
-    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -689,7 +737,8 @@ REKAP_PAGE = """<!doctype html>
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
     <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
-    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
   </div>
   <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
   <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN,
@@ -795,7 +844,7 @@ TABUNGAN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tabungan SMP Insan Amanah</title>
+<title>{{ label }} Insan Amanah</title>
 <style>""" + STYLE + TAB_EXTRA + """</style>
 </head>
 <body>
@@ -804,9 +853,10 @@ TABUNGAN_PAGE = """<!doctype html>
     <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
     <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
-    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tabungan' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
   </div>
-  <h1>&#127974; Tabungan SMP Insan Amanah</h1>
+  <h1>&#127974; {{ label }} Insan Amanah</h1>
   <p class="sub">Catat penyetoran/penarikan tabungan siswa langsung ke Google Sheet.
      Saldo dihitung otomatis (saldo bulan lalu + setor &minus; tarik).</p>
 
@@ -816,11 +866,11 @@ TABUNGAN_PAGE = """<!doctype html>
     <div class="alert err">&#9888; {{ error }}</div>
     {% if sa_email and 'share' in error|lower %}
       <p class="hint">Bagikan spreadsheet ke <strong>{{ sa_email }}</strong> sebagai <strong>Editor</strong>,
-         lalu <a href="{{ url_for('tabungan') }}">muat ulang</a>.</p>
+         lalu <a href="{{ url_for(ep_self) }}">muat ulang</a>.</p>
     {% endif %}
   {% else %}
 
-    <form class="filterbar" method="get" action="{{ url_for('tabungan') }}">
+    <form class="filterbar" method="get" action="{{ url_for(ep_self) }}">
       <div class="fld">
         <label class="lbl">Kelas</label>
         <select class="in" name="kelas" onchange="this.form.submit()">
@@ -836,7 +886,7 @@ TABUNGAN_PAGE = """<!doctype html>
       <div class="fld"><a class="btn ghost" href="{{ sheet_url }}" target="_blank" rel="noopener">&#128196; Buka Google Sheet</a></div>
     </form>
 
-    <form class="up" method="post" action="{{ url_for('tabungan_simpan') }}">
+    <form class="up" method="post" action="{{ url_for(ep_simpan) }}">
       <input type="hidden" name="kelas" value="{{ kelas }}">
       <input type="hidden" name="year" value="{{ year }}">
       <div class="tab-grid">
@@ -899,7 +949,7 @@ TABUNGAN_PAGE = """<!doctype html>
     </div>
     {% endif %}
 
-    <form method="post" action="{{ url_for('tabungan_tahun_baru') }}" style="margin-top:18px;"
+    <form method="post" action="{{ url_for(ep_tahun) }}" style="margin-top:18px;"
           onsubmit="return confirm('Buat tab T.A. {{ next_year }}/{{ next_year+1 }} untuk semua kelas? Saldo awal = saldo Juni tahun ini.');">
       <button class="btn ghost" type="submit">&#10133; Buat Tahun Ajaran {{ next_year }}/{{ next_year+1 }}</button>
     </form>
