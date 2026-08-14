@@ -925,7 +925,7 @@ TABUNGAN_PAGE = """<!doctype html>
           </div>
           <div class="field">
             <label class="lbl" for="jumlah">Jumlah (Rp)</label>
-            <input class="in" type="number" id="jumlah" name="jumlah" min="0" step="1000" placeholder="0" required>
+            <input class="in" type="number" id="jumlah" name="jumlah" min="0" step="1" placeholder="0" required>
           </div>
         </div>
       </div>
