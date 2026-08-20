@@ -2,19 +2,28 @@
 Konfigurasi & helper Laporan Keuangan SD Insan Amanah (dipakai menu Laporan
 Keuangan di app.py).
 
-Struktur tiap tab Google Sheet ("<BULAN> <TAHUN>"), per BULAN LAPORAN:
-  Baris 1 : Judul     Baris 2 : Header kolom     Baris 3+: baris outline
-  Kolom   : A=NO B=LEVEL C=LABEL D=TANGGAL E=KODE F=VOLUME G=SATUAN H=FK
-            I=KEBUTUHAN J=UNIT_COST K=TOTAL
+Struktur tiap tab Google Sheet ("<BULAN> <TAHUN>"), per BULAN LAPORAN — dibuat
+semirip mungkin dengan format asli "LAPORAN PERTANGGUNGJAWABAN OPERASIONAL":
+  Baris 1-3 : Judul (judul besar / tahun pelajaran / bulan)
+  Baris 4   : Header kolom
+  Baris 5+  : baris outline + baris subtotal "Jumlah Biaya" (otomatis)
+  Kolom     : A=NO B=ITEM C=LEVEL D=LABEL E=TANGGAL F=KODE G=VOLUME H=SATUAN
+              I=FK J=KEBUTUHAN K=UNIT_COST L=TOTAL
 
 LEVEL (1=Program..5=Rincian) menentukan indentasi tampilan & jadi input dari
-form tambah/edit. Kolom NO **tidak diketik manual** — dihitung otomatis dari
-urutan LEVEL tiap kali ada baris ditambah/diedit/dihapus (mis. Program="1",
-Sub Program="1.1", Kegiatan reset "1,2,3.." per Sub Program, Item reset
-"a,b,c.." per Kegiatan), lalu ditulis ulang ke kolom A — lihat sync_nomor()
-di lk_sheet.py. Kolom finansial (TANGGAL..TOTAL) tersedia bebas di semua
-level — tidak divalidasi per level, supaya user bisa isi sesuai kebutuhan
-nyata di lapangan.
+form tambah/edit. LEVEL_SUBTOTAL (6) khusus dipakai baris "Jumlah Biaya"
+otomatis — tidak muncul di dropdown form, dikelola sistem lewat resync().
+
+Kolom NO & ITEM **tidak diketik manual** — dihitung otomatis dari urutan
+LEVEL tiap kali ada baris ditambah/diedit/dihapus:
+  Program (lvl1) → NO="1","2"..     Sub Program (lvl2) → NO="1.1","1.2"..
+  Kegiatan (lvl3) → NO="1","2".. (reset per Sub Program)
+  Item (lvl4)     → ITEM="a","b".. (reset per Kegiatan/Sub Program terdekat)
+Baris "Jumlah Biaya" (lvl6) juga otomatis: 1 baris di akhir tiap Program,
+formula SUM atas kolom TOTAL milik Program itu. Warna latar bergantian per
+Program (2 warna, mirip contoh asli). Semua ini dikerjakan oleh resync() di
+lk_sheet.py — kolom finansial (TANGGAL..TOTAL) sendiri tersedia bebas di
+semua level, tidak divalidasi per level.
 """
 from tab_config import MONTHS_ID  # reuse, jangan duplikat
 
@@ -24,18 +33,22 @@ SERVICE_ACCOUNT_FILE = "sa-sheet.json"          # reuse via tab_sheet
 SERVICE_ACCOUNT_EMAIL = "oki-gsheet@iconic-woods-355603.iam.gserviceaccount.com"
 
 LEVEL_LABELS = ["Program", "Sub Program", "Kegiatan", "Item", "Rincian"]
+LEVEL_SUBTOTAL = 6       # internal: baris "Jumlah Biaya", dikelola resync()
+SUBTOTAL_LABEL = "Jumlah Biaya"
 
-# FIELD_KEYS = kolom yang ditulis dari form tambah/edit, mulai kolom B (NO di
-# kolom A dihitung terpisah, lihat sync_nomor()).
+# FIELD_KEYS = kolom yang ditulis dari form tambah/edit, mulai kolom C (NO/ITEM
+# di kolom A/B dihitung terpisah, lihat sync_outline() di lk_sheet.py).
 FIELD_KEYS = ["level", "label", "tanggal", "kode", "volume", "satuan", "fk",
               "kebutuhan", "unit_cost", "total"]
-HEADERS = ["NO", "LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN", "FK",
-           "KEBUTUHAN", "UNIT COST", "TOTAL"]
+HEADERS = ["NO", "ITEM", "LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN",
+           "FK", "KEBUTUHAN", "UNIT COST", "TOTAL"]
 N_COLS = len(HEADERS)
 
-TITLE_ROW = 1
-HEADER_ROW = 2
-FIRST_DATA_ROW = 3
+TITLE_ROW1 = 1
+TITLE_ROW2 = 2
+TITLE_ROW3 = 3
+HEADER_ROW = 4
+FIRST_DATA_ROW = 5
 
 # Kolom yang diperlakukan sebagai angka (untuk format & parsing)
 NUMERIC_KEYS = {"volume", "unit_cost", "total"}
@@ -43,6 +56,11 @@ NUMERIC_KEYS = {"volume", "unit_cost", "total"}
 
 def tab_name(bulan_num, tahun):
     return f"{MONTHS_ID[bulan_num - 1]} {tahun}"
+
+
+def academic_label(bulan_num, tahun):
+    start = tahun if bulan_num >= 7 else tahun - 1
+    return f"{start}/{start + 1}"
 
 
 def indent_px(level):

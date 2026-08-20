@@ -540,6 +540,7 @@ def _lk_ctx(bulan, tahun, msg=None, msgtype="info"):
     ctx = {"active": "lk_sd", "bulan": bulan, "tahun": tahun, "bulan_tahun_list": [],
            "rows": [], "rows_json": "{}", "error": None, "msg": msg, "msgtype": msgtype,
            "level_labels": LK.LEVEL_LABELS if LK else [],
+           "level_subtotal": LK.LEVEL_SUBTOTAL if LK else 6,
            "sa_email": LK.SERVICE_ACCOUNT_EMAIL if LK else "",
            "sheet_url": (f"https://docs.google.com/spreadsheets/d/{LK.SPREADSHEET_ID}"
                          if LK and LK.SPREADSHEET_ID else "#"),
@@ -601,6 +602,9 @@ def _lk_simpan():
         book = LSheet.open_book()
         ws = book.worksheet(LK.tab_name(bulan, tahun))
         if row_idx:
+            existing = next((r for r in LSheet.read_rows(ws) if r["row"] == row_idx), None)
+            if existing and existing["level"] == LK.LEVEL_SUBTOTAL:
+                raise ValueError("Baris 'Jumlah Biaya' dikelola otomatis, tidak bisa diedit manual.")
             LSheet.update_row(ws, row_idx, data)
             msg = f"✓ Baris diperbarui: {data['label']}"
         else:
@@ -620,6 +624,9 @@ def _lk_hapus():
             raise RuntimeError("Modul Laporan Keuangan belum siap.")
         book = LSheet.open_book()
         ws = book.worksheet(LK.tab_name(bulan, tahun))
+        existing = next((r for r in LSheet.read_rows(ws) if r["row"] == row_idx), None)
+        if existing and existing["level"] == LK.LEVEL_SUBTOTAL:
+            raise ValueError("Baris 'Jumlah Biaya' dikelola otomatis, tidak bisa dihapus manual.")
         LSheet.delete_row(ws, row_idx)
         return redirect(url_for("laporan_keuangan", bulan=bulan, tahun=tahun,
                                 msg="✓ Baris dihapus.", t="ok"), code=303)
@@ -1142,6 +1149,7 @@ LK_EXTRA = """
   .lk-lvl1 .lbl-cell { font-weight:700; color:var(--teal); }
   .lk-lvl2 .lbl-cell { font-weight:700; }
   .lk-lvl3 .lbl-cell { font-weight:600; }
+  .lk-subtotal { background:#e0dbf5; }
   .lk-actions a { margin-right:10px; font-size:.85rem; cursor:pointer; }
   .lk-actions .del { color:#b3261e; }
   table.data td.num, table.data th.num { text-align:right; white-space:nowrap; }
@@ -1252,13 +1260,23 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
       <div class="tblwrap" style="max-height:560px; overflow:auto;">
         <table class="data" id="dataLK">
           <thead><tr>
-            <th>No</th><th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
+            <th>No</th><th>Item</th><th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
             <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th><th>Aksi</th>
           </tr></thead>
           <tbody>
             {% for r in rows %}
+            {% if r.level == level_subtotal %}
+            <tr class="lk-row lk-subtotal">
+              <td></td><td></td>
+              <td class="lbl-cell"><em>{{ r.label }}</em></td>
+              <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+              <td class="num"><strong>{{ r.total }}</strong></td>
+              <td class="lk-actions"></td>
+            </tr>
+            {% else %}
             <tr class="lk-row lk-lvl{{ r.level }}">
               <td class="num">{{ r.no }}</td>
+              <td class="num">{{ r.item }}</td>
               <td class="lbl-cell"><span class="indent" style="width:{{ (r.level-1)*22 }}px;"></span>{{ r.label }}</td>
               <td>{{ r.tanggal }}</td><td>{{ r.kode }}</td><td class="num">{{ r.volume }}</td><td>{{ r.satuan }}</td>
               <td>{{ r.fk }}</td><td>{{ r.kebutuhan }}</td><td class="num">{{ r.unit_cost }}</td><td class="num">{{ r.total }}</td>
@@ -1275,6 +1293,7 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
                 </form>
               </td>
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
