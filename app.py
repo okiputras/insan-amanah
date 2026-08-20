@@ -1261,7 +1261,8 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
         <table class="data" id="dataLK">
           <thead><tr>
             <th>No</th><th>Item</th><th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
-            <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th><th>Aksi</th>
+            <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th>
+            <th class="num">TTL/SUB</th><th>Aksi</th>
           </tr></thead>
           <tbody>
             {% for r in rows %}
@@ -1271,6 +1272,7 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
               <td class="lbl-cell"><em>{{ r.label }}</em></td>
               <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
               <td class="num"><strong>{{ r.total }}</strong></td>
+              <td></td>
               <td class="lk-actions"></td>
             </tr>
             {% else %}
@@ -1280,6 +1282,7 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
               <td class="lbl-cell"><span class="indent" style="width:{{ (r.level-1)*22 }}px;"></span>{{ r.label }}</td>
               <td>{{ r.tanggal }}</td><td>{{ r.kode }}</td><td class="num">{{ r.volume }}</td><td>{{ r.satuan }}</td>
               <td>{{ r.fk }}</td><td>{{ r.kebutuhan }}</td><td class="num">{{ r.unit_cost }}</td><td class="num">{{ r.total }}</td>
+              <td class="num">{{ r.ttl_sub }}</td>
               <td class="lk-actions">
                 <a onclick="editRow({{ r.row }})">Edit</a>
                 <a onclick="addAfter({{ r.row }})">+ Baris</a>

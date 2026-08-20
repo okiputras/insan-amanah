@@ -8,7 +8,7 @@ semirip mungkin dengan format asli "LAPORAN PERTANGGUNGJAWABAN OPERASIONAL":
   Baris 4   : Header kolom
   Baris 5+  : baris outline + baris subtotal "Jumlah Biaya" (otomatis)
   Kolom     : A=NO B=ITEM C=LEVEL D=LABEL E=TANGGAL F=KODE G=VOLUME H=SATUAN
-              I=FK J=KEBUTUHAN K=UNIT_COST L=TOTAL
+              I=FK J=KEBUTUHAN K=UNIT_COST L=TOTAL M=TTL/SUB
 
 LEVEL (1=Program..5=Rincian) menentukan indentasi tampilan & jadi input dari
 form tambah/edit. LEVEL_SUBTOTAL (6) khusus dipakai baris "Jumlah Biaya"
@@ -20,10 +20,16 @@ LEVEL tiap kali ada baris ditambah/diedit/dihapus:
   Kegiatan (lvl3) → NO="1","2".. (reset per Sub Program)
   Item (lvl4)     → ITEM="a","b".. (reset per Kegiatan/Sub Program terdekat)
 Baris "Jumlah Biaya" (lvl6) juga otomatis: 1 baris di akhir tiap Program,
-formula SUM atas kolom TOTAL milik Program itu. Warna latar bergantian per
-Program (2 warna, mirip contoh asli). Semua ini dikerjakan oleh resync() di
-lk_sheet.py — kolom finansial (TANGGAL..TOTAL) sendiri tersedia bebas di
-semua level, tidak divalidasi per level.
+formula SUM atas kolom TOTAL milik Program itu. Kolom TTL/SUB juga otomatis:
+per baris outline yang punya baris anak (lebih dalam) langsung di bawahnya,
+diisi formula SUM atas TOTAL anak-anaknya (persis seperti contoh asli — mis.
+baris Item "a Menjenguk siswa sakit" dapat TTL/SUB = total 4 baris Rincian
+di bawahnya). Warna latar bergantian per Program (siklus 3 warna, diambil
+dari warna asli contoh: pink/tosca/kuning) & baris subtotal dapat warna biru
+muda sendiri — semua lewat conditional formatting Sheets, otomatis ikut
+baris baru. Semua ini dikerjakan oleh resync() di lk_sheet.py — kolom
+finansial (TANGGAL..TOTAL) sendiri tersedia bebas di semua level, tidak
+divalidasi per level.
 """
 from tab_config import MONTHS_ID  # reuse, jangan duplikat
 
@@ -41,7 +47,7 @@ SUBTOTAL_LABEL = "Jumlah Biaya"
 FIELD_KEYS = ["level", "label", "tanggal", "kode", "volume", "satuan", "fk",
               "kebutuhan", "unit_cost", "total"]
 HEADERS = ["NO", "ITEM", "LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN",
-           "FK", "KEBUTUHAN", "UNIT COST", "TOTAL"]
+           "FK", "KEBUTUHAN", "UNIT COST", "TOTAL", "TTL/SUB"]
 N_COLS = len(HEADERS)
 
 TITLE_ROW1 = 1

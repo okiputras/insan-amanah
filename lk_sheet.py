@@ -27,11 +27,12 @@ import tab_sheet as TS_BASE  # reuse kredensial & open_book
 get_client = TS_BASE.get_client
 
 # Kolom (0-based): 0=NO 1=ITEM 2=LEVEL 3=LABEL 4=TANGGAL 5=KODE 6=VOLUME
-#                  7=SATUAN 8=FK 9=KEBUTUHAN 10=UNIT_COST 11=TOTAL
+#                  7=SATUAN 8=FK 9=KEBUTUHAN 10=UNIT_COST 11=TOTAL 12=TTL_SUB
 NO_COL0, ITEM_COL0, LEVEL_COL0, LABEL_COL0 = 0, 1, 2, 3
 TOTAL_COL0 = 11
-MONEY_COLS0 = [6, 10, 11]   # VOLUME, UNIT_COST, TOTAL
-DATE_COL0 = 4                # TANGGAL
+TTL_SUB_COL0 = 12
+MONEY_COLS0 = [6, 10, 11, 12]   # VOLUME, UNIT_COST, TOTAL, TTL/SUB
+DATE_COL0 = 4                    # TANGGAL
 
 
 def open_book(spreadsheet_id=None, client=None):
@@ -111,7 +112,8 @@ def read_rows(ws):
         label = (row[LABEL_COL0] or "").strip()
         if not level_s and not label:
             continue
-        d = {"row": r, "no": (row[NO_COL0] or "").strip(), "item": (row[ITEM_COL0] or "").strip()}
+        d = {"row": r, "no": (row[NO_COL0] or "").strip(), "item": (row[ITEM_COL0] or "").strip(),
+             "ttl_sub": (row[TTL_SUB_COL0] or "").strip() if isinstance(row[TTL_SUB_COL0], str) else row[TTL_SUB_COL0]}
         for i, key in enumerate(C.FIELD_KEYS):
             v = row[LEVEL_COL0 + i]
             d[key] = v.strip() if isinstance(v, str) else v
@@ -147,8 +149,10 @@ def insert_row(ws, after_row_idx, data):
 
 
 def update_row(ws, row_idx, data):
+    """Tulis kolom LEVEL..TOTAL (FIELD_KEYS) saja — TTL/SUB dihitung ulang
+    oleh resync(), jangan ikut ditimpa di sini."""
     first_col = rowcol_to_a1(1, LEVEL_COL0 + 1)[:-1]   # "C"
-    last_col = rowcol_to_a1(1, C.N_COLS)[:-1]           # "L"
+    last_col = rowcol_to_a1(1, TOTAL_COL0 + 1)[:-1]     # "L"
     ws.update(f"{first_col}{row_idx}:{last_col}{row_idx}", [_row_values(data)],
               value_input_option="USER_ENTERED")
     resync(ws)
@@ -231,9 +235,33 @@ def _insert_subtotal_rows(ws):
         ws.insert_row(values, last_row + 1, value_input_option="USER_ENTERED")
 
 
+def _compute_ttl_sub(rows):
+    """Untuk tiap baris outline yang punya baris-anak (level lebih dalam)
+    langsung di bawahnya, return formula SUM atas TOTAL anak-anaknya (persis
+    seperti kolom TTL/SUB di contoh asli — mis. baris Item dapat SUM dari
+    baris-baris Rincian di bawahnya). Baris tanpa anak / baris subtotal → "".
+    """
+    total_col = rowcol_to_a1(1, TOTAL_COL0 + 1)[:-1]   # "L"
+    out = []
+    for i, r in enumerate(rows):
+        if r["level"] == C.LEVEL_SUBTOTAL:
+            out.append("")
+            continue
+        j = i + 1
+        while j < len(rows) and rows[j]["level"] != C.LEVEL_SUBTOTAL and rows[j]["level"] > r["level"]:
+            j += 1
+        children = rows[i + 1:j]
+        if children:
+            out.append(f"=SUM({total_col}{children[0]['row']}:{total_col}{children[-1]['row']})")
+        else:
+            out.append("")
+    return out
+
+
 def resync(ws):
     """Panggil setelah insert/update/delete baris outline: bangun ulang baris
-    subtotal per Program, lalu hitung ulang kolom NO & ITEM untuk semua baris."""
+    subtotal per Program, lalu hitung ulang kolom NO, ITEM & TTL/SUB untuk
+    semua baris."""
     _remove_subtotal_rows(ws)
     _insert_subtotal_rows(ws)
 
@@ -241,9 +269,13 @@ def resync(ws):
     if not rows:
         return
     no_item = _compute_no_item([r["level"] for r in rows])
+    ttl_sub = _compute_ttl_sub(rows)
     first_row, last_row = rows[0]["row"], rows[-1]["row"]
     values = [[no, item] for no, item in no_item]
     ws.update(f"A{first_row}:B{last_row}", values, value_input_option="USER_ENTERED")
+    ttl_col = rowcol_to_a1(1, TTL_SUB_COL0 + 1)[:-1]   # "M"
+    ws.update(f"{ttl_col}{first_row}:{ttl_col}{last_row}", [[v] for v in ttl_sub],
+              value_input_option="USER_ENTERED")
 
 
 # ---------------------------------------------------------------- format (sekali saat tab dibuat)
@@ -251,12 +283,15 @@ def _rgb(r, g, b):
     return {"red": r / 255, "green": g / 255, "blue": b / 255}
 
 
-TITLE_BG = _rgb(31, 78, 95)     # selaras tema teal app (--teal)
-HEADER_BG = _rgb(43, 107, 128)  # --teal2
+# Warna diambil PERSIS dari file contoh asli (LAPORAN KEUANGAN BULAN
+# DESEMBER 2023.xls) lewat xlrd formatting_info, bukan tebakan.
+TITLE_BG = _rgb(255, 153, 0)     # oranye — judul
+HEADER_BG = _rgb(0, 255, 0)      # hijau terang — header kolom
 WHITE = _rgb(255, 255, 255)
-BAND_A = _rgb(252, 231, 248)    # pink pastel (mirip Program ganjil di contoh)
-BAND_B = _rgb(214, 247, 247)    # tosca pastel (mirip Program genap di contoh)
-SUBTOTAL_BG = _rgb(224, 219, 245)
+BAND_A = _rgb(255, 153, 204)     # pink — dipakai Program ke-1, 4, 7 dst
+BAND_B = _rgb(204, 255, 255)     # tosca — Program ke-2, 5, 8 dst
+BAND_C = _rgb(255, 255, 204)     # kuning muda — Program ke-3, 6 dst
+SUBTOTAL_BG = _rgb(153, 204, 255)   # biru muda — baris "Jumlah Biaya"
 FORMAT_ROW_BOUND = 1000   # headroom baris untuk pertumbuhan data ke depan
 
 
@@ -275,9 +310,13 @@ def _format_tab(book, ws):
 
     data_first_row0 = C.FIRST_DATA_ROW - 1
 
-    reqs = [
-        {"mergeCells": {"range": rng(0, 0, 3, n_cols), "mergeType": "MERGE_ALL"}},
-    ]
+    # PENTING: 3 merge horizontal TERPISAH (satu per baris judul), BUKAN 1
+    # merge yang mencakup ke-3 baris sekaligus — merge vertikal akan membuang
+    # isi baris ke-2 & ke-3 (Sheets cuma menyimpan nilai sel kiri-atas saat
+    # merge). Ini persis pola merge di file contoh asli.
+    reqs = []
+    for r0 in range(3):
+        reqs.append({"mergeCells": {"range": rng(r0, 0, r0 + 1, n_cols), "mergeType": "MERGE_ALL"}})
     for r0 in range(3):
         reqs.append({"repeatCell": {
             "range": rng(r0, 0, r0 + 1, n_cols),
@@ -320,12 +359,15 @@ def _format_tab(book, ws):
                 "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
                 "format": fmt}}, "index": 0}}
 
-    # Warna latar bergantian per Program: hitung berapa banyak baris LEVEL=1
-    # dari baris pertama sampai baris ini (COUNTIF), ganjil/genap → 2 warna.
+    # Warna latar bergantian per Program (siklus 3 warna pink/tosca/kuning,
+    # mirip contoh asli): hitung berapa banyak baris LEVEL=1 dari baris
+    # pertama sampai baris ini (COUNTIF), lalu MOD 3 menentukan warnanya.
     # Pakai range absolut $col$first:col{row} supaya ikut membesar otomatis.
     count_formula = f"COUNTIF(${level_col_a1}${anchor_row}:{level_col_a1}{anchor_row},1)"
-    reqs.append(cond(f"=ISODD({count_formula})", {"backgroundColor": BAND_A}))
-    reqs.append(cond(f"=ISEVEN({count_formula})", {"backgroundColor": BAND_B}))
+    band_formula = f"MOD({count_formula}-1,3)"
+    reqs.append(cond(f"={band_formula}=0", {"backgroundColor": BAND_A}))
+    reqs.append(cond(f"={band_formula}=1", {"backgroundColor": BAND_B}))
+    reqs.append(cond(f"={band_formula}=2", {"backgroundColor": BAND_C}))
 
     # Bold per LEVEL (Program/Sub Program/Kegiatan/Item) & subtotal
     def lvl_cond(level, fmt):
