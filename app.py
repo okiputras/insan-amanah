@@ -579,8 +579,7 @@ def _lk_render():
 
 
 def _lk_form_data():
-    keys = ["tanggal", "kode", "volume", "satuan", "fk", "kebutuhan", "unit_cost",
-            "total", "rencana", "spp", "bsm", "bosda", "bosnas"]
+    keys = ["tanggal", "kode", "volume", "satuan", "fk", "kebutuhan", "unit_cost", "total"]
     data = {"level": request.form.get("level", type=int) or 1,
             "label": (request.form.get("label") or "").strip()}
     for k in keys:
@@ -1240,16 +1239,6 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
                 <input class="in" type="number" step="any" id="f_unit_cost" name="unit_cost" oninput="autoTotal()"></div>
               <div><label class="lbl" for="f_total">Total</label>
                 <input class="in" type="number" step="any" id="f_total" name="total"></div>
-              <div><label class="lbl" for="f_rencana">Rencana</label>
-                <input class="in" type="number" step="any" id="f_rencana" name="rencana"></div>
-              <div><label class="lbl" for="f_spp">SPP</label>
-                <input class="in" type="number" step="any" id="f_spp" name="spp"></div>
-              <div><label class="lbl" for="f_bsm">BSM</label>
-                <input class="in" type="number" step="any" id="f_bsm" name="bsm"></div>
-              <div><label class="lbl" for="f_bosda">BOSDA</label>
-                <input class="in" type="number" step="any" id="f_bosda" name="bosda"></div>
-              <div><label class="lbl" for="f_bosnas">BOSNAS</label>
-                <input class="in" type="number" step="any" id="f_bosnas" name="bosnas"></div>
             </div>
           </div>
         </div>
@@ -1264,9 +1253,7 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
         <table class="data" id="dataLK">
           <thead><tr>
             <th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
-            <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th>
-            <th class="num">Rencana</th><th class="num">SPP</th><th class="num">BSM</th>
-            <th class="num">BOSDA</th><th class="num">BOSNAS</th><th>Aksi</th>
+            <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th><th>Aksi</th>
           </tr></thead>
           <tbody>
             {% for r in rows %}
@@ -1274,8 +1261,6 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
               <td class="lbl-cell"><span class="indent" style="width:{{ (r.level-1)*22 }}px;"></span>{{ r.label }}</td>
               <td>{{ r.tanggal }}</td><td>{{ r.kode }}</td><td class="num">{{ r.volume }}</td><td>{{ r.satuan }}</td>
               <td>{{ r.fk }}</td><td>{{ r.kebutuhan }}</td><td class="num">{{ r.unit_cost }}</td><td class="num">{{ r.total }}</td>
-              <td class="num">{{ r.rencana }}</td><td class="num">{{ r.spp }}</td><td class="num">{{ r.bsm }}</td>
-              <td class="num">{{ r.bosda }}</td><td class="num">{{ r.bosnas }}</td>
               <td class="lk-actions">
                 <a onclick="editRow({{ r.row }})">Edit</a>
                 <a onclick="addAfter({{ r.row }})">+ Baris</a>
@@ -1330,11 +1315,6 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
     document.getElementById('f_kebutuhan').value = r.kebutuhan || '';
     document.getElementById('f_unit_cost').value = r.unit_cost || '';
     document.getElementById('f_total').value = r.total || '';
-    document.getElementById('f_rencana').value = r.rencana || '';
-    document.getElementById('f_spp').value = r.spp || '';
-    document.getElementById('f_bsm').value = r.bsm || '';
-    document.getElementById('f_bosda').value = r.bosda || '';
-    document.getElementById('f_bosnas').value = r.bosnas || '';
   }
   function editRow(rowIdx){
     var r = LK_ROWS[rowIdx];
