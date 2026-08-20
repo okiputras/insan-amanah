@@ -34,6 +34,15 @@ except Exception as _e:            # noqa
     TC = TS = None
     _TAB_IMPORT_ERR = str(_e)
 
+# Menu Laporan Keuangan SD (Google Sheets via gspread). Sama pola soft-import.
+try:
+    import lk_config as LK
+    import lk_sheet as LSheet
+    _LK_IMPORT_ERR = None
+except Exception as _e:            # noqa
+    LK = LSheet = None
+    _LK_IMPORT_ERR = str(_e)
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
 PREVIEW_LIMIT = 100                                    # baris maksimum di tabel preview
@@ -522,6 +531,144 @@ def tabungan_sd_tahun_baru():
     return _tab_tahun_baru("sd")
 
 
+# ---------------------------------------------------------------- Laporan Keuangan SD
+def _lk_next_bulan_tahun(bulan, tahun):
+    return (1, tahun + 1) if bulan == 12 else (bulan + 1, tahun)
+
+
+def _lk_ctx(bulan, tahun, msg=None, msgtype="info"):
+    ctx = {"active": "lk_sd", "bulan": bulan, "tahun": tahun, "bulan_tahun_list": [],
+           "rows": [], "rows_json": "{}", "error": None, "msg": msg, "msgtype": msgtype,
+           "level_labels": LK.LEVEL_LABELS if LK else [],
+           "sa_email": LK.SERVICE_ACCOUNT_EMAIL if LK else "",
+           "sheet_url": (f"https://docs.google.com/spreadsheets/d/{LK.SPREADSHEET_ID}"
+                         if LK and LK.SPREADSHEET_ID else "#"),
+           "tab_title": None, "next_bulan": None, "next_tahun": None}
+    if LSheet is None:
+        ctx["error"] = "Modul Laporan Keuangan belum siap: " + (_LK_IMPORT_ERR or "gspread belum terpasang.")
+        return ctx
+    if not LK.SPREADSHEET_ID:
+        ctx["error"] = "SPREADSHEET_ID belum diisi di lk_config.py. Jalankan lk_build.py dulu."
+        return ctx
+    try:
+        book = LSheet.open_book()
+    except Exception as e:  # noqa
+        ctx["error"] = str(e)
+        return ctx
+    tabs = LSheet.list_bulan_tabs(book)
+    if not tabs:
+        ctx["error"] = "Belum ada tab bulan di spreadsheet Laporan Keuangan. Jalankan lk_build.py dulu."
+        return ctx
+    if not any(b == bulan and t == tahun for b, t, _ in tabs):
+        bulan, tahun, _ = tabs[-1]
+    ctx["bulan"], ctx["tahun"], ctx["bulan_tahun_list"] = bulan, tahun, tabs
+    ctx["next_bulan"], ctx["next_tahun"] = _lk_next_bulan_tahun(bulan, tahun)
+    title = LK.tab_name(bulan, tahun)
+    ctx["tab_title"] = title
+    ws = book.worksheet(title)
+    rows = LSheet.read_rows(ws)
+    ctx["rows"] = rows
+    ctx["rows_json"] = json.dumps({str(r["row"]): r for r in rows})
+    return ctx
+
+
+def _lk_render():
+    return render_template_string(LAPORAN_KEUANGAN_PAGE, **_lk_ctx(
+        request.args.get("bulan", type=int), request.args.get("tahun", type=int),
+        msg=request.args.get("msg"), msgtype=request.args.get("t", "info")))
+
+
+def _lk_form_data():
+    keys = ["tanggal", "kode", "volume", "satuan", "fk", "kebutuhan", "unit_cost",
+            "total", "rencana", "spp", "bsm", "bosda", "bosnas"]
+    data = {"level": request.form.get("level", type=int) or 1,
+            "label": (request.form.get("label") or "").strip()}
+    for k in keys:
+        data[k] = (request.form.get(k) or "").strip()
+    return data
+
+
+def _lk_simpan():
+    bulan = request.form.get("bulan", type=int)
+    tahun = request.form.get("tahun", type=int)
+    row_idx = request.form.get("row_idx", type=int)
+    after_row_idx = request.form.get("after_row_idx", type=int)
+    try:
+        if LSheet is None:
+            raise RuntimeError("Modul Laporan Keuangan belum siap.")
+        data = _lk_form_data()
+        if not data["label"]:
+            raise ValueError("Label tidak boleh kosong.")
+        book = LSheet.open_book()
+        ws = book.worksheet(LK.tab_name(bulan, tahun))
+        if row_idx:
+            LSheet.update_row(ws, row_idx, data)
+            msg = f"✓ Baris diperbarui: {data['label']}"
+        else:
+            LSheet.insert_row(ws, after_row_idx, data)
+            msg = f"✓ Baris ditambahkan: {data['label']}"
+        return redirect(url_for("laporan_keuangan", bulan=bulan, tahun=tahun, msg=msg, t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for("laporan_keuangan", bulan=bulan, tahun=tahun, msg=str(e), t="err"), code=303)
+
+
+def _lk_hapus():
+    bulan = request.form.get("bulan", type=int)
+    tahun = request.form.get("tahun", type=int)
+    row_idx = request.form.get("row_idx", type=int)
+    try:
+        if LSheet is None:
+            raise RuntimeError("Modul Laporan Keuangan belum siap.")
+        book = LSheet.open_book()
+        ws = book.worksheet(LK.tab_name(bulan, tahun))
+        LSheet.delete_row(ws, row_idx)
+        return redirect(url_for("laporan_keuangan", bulan=bulan, tahun=tahun,
+                                msg="✓ Baris dihapus.", t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for("laporan_keuangan", bulan=bulan, tahun=tahun, msg=str(e), t="err"), code=303)
+
+
+def _lk_bulan_baru():
+    bulan = request.form.get("bulan", type=int)
+    tahun = request.form.get("tahun", type=int)
+    new_bulan = request.form.get("new_bulan", type=int)
+    new_tahun = request.form.get("new_tahun", type=int)
+    try:
+        if LSheet is None:
+            raise RuntimeError("Modul Laporan Keuangan belum siap.")
+        book = LSheet.open_book()
+        clone_from = None
+        try:
+            clone_from = book.worksheet(LK.tab_name(bulan, tahun))
+        except Exception:
+            pass
+        LSheet.ensure_bulan_tab(book, new_bulan, new_tahun, clone_from=clone_from)
+        msg = f"✓ Tab {LK.tab_name(new_bulan, new_tahun)} dibuat."
+        return redirect(url_for("laporan_keuangan", bulan=new_bulan, tahun=new_tahun, msg=msg, t="ok"), code=303)
+    except Exception as e:  # noqa
+        return redirect(url_for("laporan_keuangan", msg=str(e), t="err"), code=303)
+
+
+@app.route("/laporan-keuangan")
+def laporan_keuangan():
+    return _lk_render()
+
+
+@app.route("/laporan-keuangan/simpan", methods=["POST"])
+def laporan_keuangan_simpan():
+    return _lk_simpan()
+
+
+@app.route("/laporan-keuangan/hapus", methods=["POST"])
+def laporan_keuangan_hapus():
+    return _lk_hapus()
+
+
+@app.route("/laporan-keuangan/bulan-baru", methods=["POST"])
+def laporan_keuangan_bulan_baru():
+    return _lk_bulan_baru()
+
+
 @app.route("/health")
 def health():
     return "ok", 200
@@ -616,6 +763,7 @@ PAGE = """<!doctype html>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
+    <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -739,6 +887,7 @@ REKAP_PAGE = """<!doctype html>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
+    <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
   </div>
   <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
   <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN,
@@ -855,6 +1004,7 @@ TABUNGAN_PAGE = """<!doctype html>
     <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
+    <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
   </div>
   <h1>&#127974; {{ label }} Insan Amanah</h1>
   <p class="sub">Catat penyetoran/penarikan tabungan siswa langsung ke Google Sheet.
@@ -981,6 +1131,232 @@ TABUNGAN_PAGE = """<!doctype html>
         : tr.textContent.toLowerCase();
       tr.style.display = t.indexOf(q) > -1 ? '' : 'none';
     });
+  }
+</script>
+</body>
+</html>"""
+
+
+LK_EXTRA = """
+  .lk-row td.lbl-cell { white-space:nowrap; }
+  .lk-row .indent { display:inline-block; }
+  .lk-lvl1 .lbl-cell { font-weight:700; color:var(--teal); }
+  .lk-lvl2 .lbl-cell { font-weight:700; }
+  .lk-lvl3 .lbl-cell { font-weight:600; }
+  .lk-actions a { margin-right:10px; font-size:.85rem; cursor:pointer; }
+  .lk-actions .del { color:#b3261e; }
+  table.data td.num, table.data th.num { text-align:right; white-space:nowrap; }
+  .form-title { color:var(--teal); font-weight:700; margin:0 0 10px; }
+  .fin-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  @media (max-width:900px){ .fin-grid{ grid-template-columns:repeat(2,1fr); } }
+"""
+
+LAPORAN_KEUANGAN_PAGE = """<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laporan Keuangan SD Insan Amanah</title>
+<style>""" + STYLE + TAB_EXTRA + LK_EXTRA + """</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav">
+    <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
+    <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
+    <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
+    <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+  </div>
+  <h1>&#128176; Laporan Keuangan SD Insan Amanah</h1>
+  <p class="sub">Rincian Program &rarr; Sub Program &rarr; Kegiatan &rarr; Rincian, tersimpan
+     langsung di Google Sheet. Tiap baris bisa ditambah, diedit, atau dihapus bebas.</p>
+
+  {% if msg %}<div class="alert {{ msgtype }}" style="margin-bottom:16px;">{{ msg }}</div>{% endif %}
+
+  {% if error %}
+    <div class="alert err">&#9888; {{ error }}</div>
+    {% if sa_email and 'share' in error|lower %}
+      <p class="hint">Bagikan spreadsheet ke <strong>{{ sa_email }}</strong> sebagai <strong>Editor</strong>,
+         lalu <a href="{{ url_for('laporan_keuangan') }}">muat ulang</a>.</p>
+    {% endif %}
+  {% else %}
+
+    <form class="filterbar" method="get" action="{{ url_for('laporan_keuangan') }}">
+      <div class="fld">
+        <label class="lbl">Bulan</label>
+        <select class="in" name="bt" onchange="var p=this.value.split('|');
+                document.getElementById('selBulan').value=p[0];
+                document.getElementById('selTahun').value=p[1]; this.form.submit();">
+          {% for b,t,title in bulan_tahun_list %}
+            <option value="{{ b }}|{{ t }}" {{ 'selected' if b==bulan and t==tahun else '' }}>{{ title }}</option>
+          {% endfor %}
+        </select>
+        <input type="hidden" id="selBulan" name="bulan" value="{{ bulan }}">
+        <input type="hidden" id="selTahun" name="tahun" value="{{ tahun }}">
+      </div>
+      <div class="fld"><a class="btn ghost" href="{{ sheet_url }}" target="_blank" rel="noopener">&#128196; Buka Google Sheet</a></div>
+    </form>
+
+    <div class="combined">
+      <p class="form-title" id="formTitle">&#10133; Tambah Baris</p>
+      <form method="post" action="{{ url_for('laporan_keuangan_simpan') }}" id="lkForm">
+        <input type="hidden" name="bulan" value="{{ bulan }}">
+        <input type="hidden" name="tahun" value="{{ tahun }}">
+        <input type="hidden" name="row_idx" id="f_row_idx" value="">
+        <input type="hidden" name="after_row_idx" id="f_after_row_idx" value="">
+        <div class="tab-grid">
+          <div>
+            <div class="field">
+              <label class="lbl" for="f_level">Level</label>
+              <select class="in" id="f_level" name="level">
+                {% for lab in level_labels %}
+                  <option value="{{ loop.index }}">{{ loop.index }} &middot; {{ lab }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field">
+              <label class="lbl" for="f_label">Label / Rincian</label>
+              <input class="in" id="f_label" name="label" placeholder="mis. Rapat Kerja (Raker)" required>
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl">Kolom Keuangan (isi jika perlu)</label>
+            <div class="fin-grid">
+              <div><label class="lbl" for="f_tanggal">Tanggal</label>
+                <input class="in" type="date" id="f_tanggal" name="tanggal"></div>
+              <div><label class="lbl" for="f_kode">Kode</label>
+                <input class="in" id="f_kode" name="kode"></div>
+              <div><label class="lbl" for="f_volume">Volume</label>
+                <input class="in" type="number" step="any" id="f_volume" name="volume" oninput="autoTotal()"></div>
+              <div><label class="lbl" for="f_satuan">Satuan</label>
+                <input class="in" id="f_satuan" name="satuan"></div>
+              <div><label class="lbl" for="f_fk">FK</label>
+                <input class="in" id="f_fk" name="fk"></div>
+              <div><label class="lbl" for="f_kebutuhan">Kebutuhan</label>
+                <input class="in" id="f_kebutuhan" name="kebutuhan"></div>
+              <div><label class="lbl" for="f_unit_cost">Unit Cost</label>
+                <input class="in" type="number" step="any" id="f_unit_cost" name="unit_cost" oninput="autoTotal()"></div>
+              <div><label class="lbl" for="f_total">Total</label>
+                <input class="in" type="number" step="any" id="f_total" name="total"></div>
+              <div><label class="lbl" for="f_rencana">Rencana</label>
+                <input class="in" type="number" step="any" id="f_rencana" name="rencana"></div>
+              <div><label class="lbl" for="f_spp">SPP</label>
+                <input class="in" type="number" step="any" id="f_spp" name="spp"></div>
+              <div><label class="lbl" for="f_bsm">BSM</label>
+                <input class="in" type="number" step="any" id="f_bsm" name="bsm"></div>
+              <div><label class="lbl" for="f_bosda">BOSDA</label>
+                <input class="in" type="number" step="any" id="f_bosda" name="bosda"></div>
+              <div><label class="lbl" for="f_bosnas">BOSNAS</label>
+                <input class="in" type="number" step="any" id="f_bosnas" name="bosnas"></div>
+            </div>
+          </div>
+        </div>
+        <button class="btn primary" type="submit">&#128190; Simpan</button>
+        <a class="btn ghost" onclick="resetForm()" style="margin-left:10px;">Batal / Baris Baru</a>
+      </form>
+    </div>
+
+    <div class="combined" style="margin-top:22px;">
+      <h2>&#128202; {{ tab_title }}</h2>
+      <div class="tblwrap" style="max-height:560px; overflow:auto;">
+        <table class="data" id="dataLK">
+          <thead><tr>
+            <th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
+            <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th>
+            <th class="num">Rencana</th><th class="num">SPP</th><th class="num">BSM</th>
+            <th class="num">BOSDA</th><th class="num">BOSNAS</th><th>Aksi</th>
+          </tr></thead>
+          <tbody>
+            {% for r in rows %}
+            <tr class="lk-row lk-lvl{{ r.level }}">
+              <td class="lbl-cell"><span class="indent" style="width:{{ (r.level-1)*22 }}px;"></span>{{ r.label }}</td>
+              <td>{{ r.tanggal }}</td><td>{{ r.kode }}</td><td class="num">{{ r.volume }}</td><td>{{ r.satuan }}</td>
+              <td>{{ r.fk }}</td><td>{{ r.kebutuhan }}</td><td class="num">{{ r.unit_cost }}</td><td class="num">{{ r.total }}</td>
+              <td class="num">{{ r.rencana }}</td><td class="num">{{ r.spp }}</td><td class="num">{{ r.bsm }}</td>
+              <td class="num">{{ r.bosda }}</td><td class="num">{{ r.bosnas }}</td>
+              <td class="lk-actions">
+                <a onclick="editRow({{ r.row }})">Edit</a>
+                <a onclick="addAfter({{ r.row }})">+ Baris</a>
+                <form method="post" action="{{ url_for('laporan_keuangan_hapus') }}" style="display:inline;"
+                      onsubmit="return confirm('Hapus baris &quot;{{ r.label }}&quot;?');">
+                  <input type="hidden" name="bulan" value="{{ bulan }}">
+                  <input type="hidden" name="tahun" value="{{ tahun }}">
+                  <input type="hidden" name="row_idx" value="{{ r.row }}">
+                  <button type="submit" class="del" style="background:none;border:0;padding:0;
+                          font-size:.85rem;color:#b3261e;cursor:pointer;">Hapus</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <form method="post" action="{{ url_for('laporan_keuangan_bulan_baru') }}" style="margin-top:18px;"
+          onsubmit="return confirm('Buat tab bulan baru? Struktur Program/Sub Program/Kegiatan bulan ini akan disalin, kolom keuangan dikosongkan.');">
+      <input type="hidden" name="bulan" value="{{ bulan }}">
+      <input type="hidden" name="tahun" value="{{ tahun }}">
+      <input type="hidden" name="new_bulan" value="{{ next_bulan }}">
+      <input type="hidden" name="new_tahun" value="{{ next_tahun }}">
+      <button class="btn ghost" type="submit">&#10133; Buat Bulan Berikutnya</button>
+    </form>
+
+  {% endif %}
+
+  <hr class="sep">
+  <p class="foot">Data tersimpan di Google Sheet (sumber tunggal). Kolom keuangan bebas diisi
+     di level manapun sesuai kebutuhan.</p>
+</div>
+
+<script>
+  const LK_ROWS = {{ rows_json|safe }};
+  function resetForm(){
+    document.getElementById('lkForm').reset();
+    document.getElementById('f_row_idx').value = '';
+    document.getElementById('f_after_row_idx').value = '';
+    document.getElementById('formTitle').innerHTML = '&#10133; Tambah Baris';
+  }
+  function fillForm(r){
+    document.getElementById('f_level').value = r.level;
+    document.getElementById('f_label').value = r.label || '';
+    document.getElementById('f_tanggal').value = r.tanggal || '';
+    document.getElementById('f_kode').value = r.kode || '';
+    document.getElementById('f_volume').value = r.volume || '';
+    document.getElementById('f_satuan').value = r.satuan || '';
+    document.getElementById('f_fk').value = r.fk || '';
+    document.getElementById('f_kebutuhan').value = r.kebutuhan || '';
+    document.getElementById('f_unit_cost').value = r.unit_cost || '';
+    document.getElementById('f_total').value = r.total || '';
+    document.getElementById('f_rencana').value = r.rencana || '';
+    document.getElementById('f_spp').value = r.spp || '';
+    document.getElementById('f_bsm').value = r.bsm || '';
+    document.getElementById('f_bosda').value = r.bosda || '';
+    document.getElementById('f_bosnas').value = r.bosnas || '';
+  }
+  function editRow(rowIdx){
+    var r = LK_ROWS[rowIdx];
+    if (!r) return;
+    fillForm(r);
+    document.getElementById('f_row_idx').value = rowIdx;
+    document.getElementById('f_after_row_idx').value = '';
+    document.getElementById('formTitle').innerHTML = '&#9998; Edit Baris #' + rowIdx;
+    document.getElementById('lkForm').scrollIntoView({behavior:'smooth'});
+  }
+  function addAfter(rowIdx){
+    resetForm();
+    document.getElementById('f_after_row_idx').value = rowIdx;
+    document.getElementById('formTitle').innerHTML = '&#10133; Tambah Baris (setelah baris ini)';
+    document.getElementById('lkForm').scrollIntoView({behavior:'smooth'});
+    document.getElementById('f_label').focus();
+  }
+  function autoTotal(){
+    var vol = parseFloat(document.getElementById('f_volume').value) || 0;
+    var uc = parseFloat(document.getElementById('f_unit_cost').value) || 0;
+    var totalEl = document.getElementById('f_total');
+    if (!totalEl.value && vol && uc) totalEl.value = Math.round(vol*uc);
   }
 </script>
 </body>

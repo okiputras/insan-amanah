@@ -1,6 +1,6 @@
 # Konverter & Validasi Laporan Insan Amanah
 
-Aplikasi web dengan 3 menu:
+Aplikasi web dengan beberapa menu:
 
 1. **Konversi R-5401** — mengubah file laporan transaksi harian bank (R-5401, format
    teks lebar-tetap) menjadi file Excel rapi berisi sheet **Data Transaksi** dan
@@ -15,6 +15,18 @@ Aplikasi web dengan 3 menu:
 3. **Data Validasi SMP** — sama seperti Data Validasi SD, tetapi pencocokannya
    **NO VA = kode sekolah + No. Pelanggan** (mis. `63713` + `0318` = `637130318`),
    karena laporan SMP memakai kode pelanggan pendek (4 digit), bukan NO VA penuh.
+4. **Tabungan SMP / Tabungan SD** — catat penyetoran/penarikan tabungan siswa
+   langsung ke Google Sheet (1 spreadsheet per jenjang, 1 tab per kelas &
+   tahun ajaran). Saldo dihitung otomatis lewat formula berjalan.
+5. **Laporan Keuangan SD** — catat laporan pertanggungjawaban operasional
+   (Program &rarr; Sub Program &rarr; Kegiatan &rarr; Rincian) di Google Sheet,
+   1 tab per bulan. Setiap baris (level manapun) bisa ditambah, diedit, atau
+   dihapus bebas — beda dengan Tabungan yang kolomnya tetap per bulan, di sini
+   jumlah baris per kategori dinamis.
+
+Menu 4 & 5 butuh kredensial Google service account (`sa-sheet.json` atau env
+`GOOGLE_SERVICE_ACCOUNT_JSON`) yang sudah di-share sebagai Editor ke
+spreadsheet terkait — lihat komentar di `tab_config.py` / `lk_config.py`.
 
 Dibangun **ringan** dengan Flask + openpyxl (tanpa numpy/pandas/pyarrow), memakai
 HTTP request/response biasa — hemat memori dan stabil di container kecil.
@@ -49,10 +61,16 @@ Buka http://localhost:8501
 
 ## Struktur file
 ```
-app.py            # aplikasi Flask (routing, upload, render hasil, endpoint unduh, 3 menu)
+app.py            # aplikasi Flask (routing, semua menu & template halaman)
 parser.py         # parsing R-5401 + pembuatan Excel (openpyxl)
 validator.py      # parsing master siswa (xlsx), join ke laporan R-5401 (SD/SMP), rekap Excel (Sesuai saja)
-requirements.txt  # Flask, openpyxl, gunicorn
+tab_config.py     # konstanta & helper menu Tabungan (grid tetap per bulan)
+tab_sheet.py      # akses Google Sheets (kredensial, CRUD) untuk Tabungan — di-reuse Laporan Keuangan
+tab_build.py, tab_build_sd.py  # skrip admin sekali-jalan: isi Tabungan SMP/SD dari Excel master
+lk_config.py      # konstanta & layout kolom menu Laporan Keuangan (outline dinamis)
+lk_sheet.py       # CRUD Google Sheets untuk Laporan Keuangan (insert/update/delete baris)
+lk_build.py       # skrip admin sekali-jalan: isi tab bulan pertama Laporan Keuangan
+requirements.txt  # Flask, openpyxl, gunicorn, gspread, google-auth
 Procfile          # start command untuk platform berbasis Procfile
 railway.json      # start command untuk Railway
 runtime.txt       # versi Python
