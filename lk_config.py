@@ -4,12 +4,17 @@ Keuangan di app.py).
 
 Struktur tiap tab Google Sheet ("<BULAN> <TAHUN>"), per BULAN LAPORAN:
   Baris 1 : Judul     Baris 2 : Header kolom     Baris 3+: baris outline
-  Kolom   : A=LEVEL B=LABEL C=TANGGAL D=KODE E=VOLUME F=SATUAN G=FK
-            H=KEBUTUHAN I=UNIT_COST J=TOTAL
+  Kolom   : A=NO B=LEVEL C=LABEL D=TANGGAL E=KODE F=VOLUME G=SATUAN H=FK
+            I=KEBUTUHAN J=UNIT_COST K=TOTAL
 
-LEVEL menentukan indentasi tampilan (1=Program .. 5=Rincian) tapi kolom
-finansial (TANGGAL..TOTAL) tersedia bebas di semua level — tidak divalidasi
-per level, supaya user bisa isi sesuai kebutuhan nyata di lapangan.
+LEVEL (1=Program..5=Rincian) menentukan indentasi tampilan & jadi input dari
+form tambah/edit. Kolom NO **tidak diketik manual** — dihitung otomatis dari
+urutan LEVEL tiap kali ada baris ditambah/diedit/dihapus (mis. Program="1",
+Sub Program="1.1", Kegiatan reset "1,2,3.." per Sub Program, Item reset
+"a,b,c.." per Kegiatan), lalu ditulis ulang ke kolom A — lihat sync_nomor()
+di lk_sheet.py. Kolom finansial (TANGGAL..TOTAL) tersedia bebas di semua
+level — tidak divalidasi per level, supaya user bisa isi sesuai kebutuhan
+nyata di lapangan.
 """
 from tab_config import MONTHS_ID  # reuse, jangan duplikat
 
@@ -20,11 +25,13 @@ SERVICE_ACCOUNT_EMAIL = "oki-gsheet@iconic-woods-355603.iam.gserviceaccount.com"
 
 LEVEL_LABELS = ["Program", "Sub Program", "Kegiatan", "Item", "Rincian"]
 
+# FIELD_KEYS = kolom yang ditulis dari form tambah/edit, mulai kolom B (NO di
+# kolom A dihitung terpisah, lihat sync_nomor()).
 FIELD_KEYS = ["level", "label", "tanggal", "kode", "volume", "satuan", "fk",
               "kebutuhan", "unit_cost", "total"]
-HEADERS = ["LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN", "FK",
+HEADERS = ["NO", "LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN", "FK",
            "KEBUTUHAN", "UNIT COST", "TOTAL"]
-N_COLS = len(FIELD_KEYS)
+N_COLS = len(HEADERS)
 
 TITLE_ROW = 1
 HEADER_ROW = 2

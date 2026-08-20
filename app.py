@@ -1252,12 +1252,13 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
       <div class="tblwrap" style="max-height:560px; overflow:auto;">
         <table class="data" id="dataLK">
           <thead><tr>
-            <th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
+            <th>No</th><th>Label</th><th>Tanggal</th><th>Kode</th><th class="num">Volume</th><th>Satuan</th>
             <th>FK</th><th>Kebutuhan</th><th class="num">Unit Cost</th><th class="num">Total</th><th>Aksi</th>
           </tr></thead>
           <tbody>
             {% for r in rows %}
             <tr class="lk-row lk-lvl{{ r.level }}">
+              <td class="num">{{ r.no }}</td>
               <td class="lbl-cell"><span class="indent" style="width:{{ (r.level-1)*22 }}px;"></span>{{ r.label }}</td>
               <td>{{ r.tanggal }}</td><td>{{ r.kode }}</td><td class="num">{{ r.volume }}</td><td>{{ r.satuan }}</td>
               <td>{{ r.fk }}</td><td>{{ r.kebutuhan }}</td><td class="num">{{ r.unit_cost }}</td><td class="num">{{ r.total }}</td>
