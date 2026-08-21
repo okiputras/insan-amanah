@@ -580,10 +580,9 @@ def _lk_render():
 
 
 def _lk_form_data():
-    keys = ["tanggal", "kode", "volume", "satuan", "fk", "kebutuhan", "unit_cost", "total"]
     data = {"level": request.form.get("level", type=int) or 1,
             "label": (request.form.get("label") or "").strip()}
-    for k in keys:
+    for k in LK.FIN_COLS:          # ikut definisi kolom di lk_config
         data[k] = (request.form.get(k) or "").strip()
     return data
 

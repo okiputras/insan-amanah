@@ -2,34 +2,41 @@
 Konfigurasi & helper Laporan Keuangan SD Insan Amanah (dipakai menu Laporan
 Keuangan di app.py).
 
-Struktur tiap tab Google Sheet ("<BULAN> <TAHUN>"), per BULAN LAPORAN — dibuat
-semirip mungkin dengan format asli "LAPORAN PERTANGGUNGJAWABAN OPERASIONAL":
-  Baris 1-3 : Judul (judul besar / tahun pelajaran / bulan)
-  Baris 4   : Header kolom
-  Baris 5+  : baris outline + baris subtotal "Jumlah Biaya" (otomatis)
-  Kolom     : A=NO B=ITEM C=LEVEL D=LABEL E=TANGGAL F=KODE G=VOLUME H=SATUAN
-              I=FK J=KEBUTUHAN K=UNIT_COST L=TOTAL M=TTL/SUB
+Tata letak tiap tab Google Sheet ("<BULAN> <TAHUN>") dibuat MENGIKUTI PERSIS
+file contoh "LAPORAN KEUANGAN BULAN DESEMBER 2023.xls" (sheet 'laporan
+keuangan'), kecuali kolom Sumber Anggaran (RENCANA/SPP/BSM/BOSDA/BOSNAS) yang
+sengaja tidak dipakai.
 
-LEVEL (1=Program..5=Rincian) menentukan indentasi tampilan & jadi input dari
-form tambah/edit. LEVEL_SUBTOTAL (6) khusus dipakai baris "Jumlah Biaya"
-otomatis — tidak muncul di dropdown form, dikelola sistem lewat resync().
+  Baris 1-3 : Judul (judul besar / tahun pelajaran / bulan), merge B..Q
+  Baris 4   : kosong (pemisah, seperti di file asli)
+  Baris 5-6 : Header 2 tingkat — grup "RINCIAN" menaungi VOLUME..TTL/SUB
+  Baris 7+  : baris outline + baris subtotal "Jumlah Biaya" (otomatis)
 
-Kolom NO & ITEM **tidak diketik manual** — dihitung otomatis dari urutan
-LEVEL tiap kali ada baris ditambah/diedit/dihapus:
-  Program (lvl1) → NO="1","2"..     Sub Program (lvl2) → NO="1.1","1.2"..
-  Kegiatan (lvl3) → NO="1","2".. (reset per Sub Program)
-  Item (lvl4)     → ITEM="a","b".. (reset per Kegiatan/Sub Program terdekat)
-Baris "Jumlah Biaya" (lvl6) juga otomatis: 1 baris di akhir tiap Program,
-formula SUM atas kolom TOTAL milik Program itu. Kolom TTL/SUB juga otomatis:
-per baris outline yang punya baris anak (lebih dalam) langsung di bawahnya,
-diisi formula SUM atas TOTAL anak-anaknya (persis seperti contoh asli — mis.
-baris Item "a Menjenguk siswa sakit" dapat TTL/SUB = total 4 baris Rincian
-di bawahnya). Warna latar bergantian per Program (siklus 3 warna, diambil
-dari warna asli contoh: pink/tosca/kuning) & baris subtotal dapat warna biru
-muda sendiri — semua lewat conditional formatting Sheets, otomatis ikut
-baris baru. Semua ini dikerjakan oleh resync() di lk_sheet.py — kolom
-finansial (TANGGAL..TOTAL) sendiri tersedia bebas di semua level, tidak
-divalidasi per level.
+Kolom (1-based):
+  A  spacer sempit          B  NO (nomor Program)
+  C  no Sub Program / nama Program
+  D  nama Sub Program       E  no Kegiatan
+  F  huruf Item / nama Kegiatan / teks Rincian (di bawah Kegiatan)
+  G  nama Item / teks Rincian (di bawah Item)
+  H  kolom lebar tempat teks F/G meluber (kosong, seperti aslinya)
+  I  TANGGAL   J  KODE/KW   K  VOLUME   L  SATUAN   M  FK
+  N  KEBUTUHAN O  UNIT COST P  TOTAL    Q  TTL/SUB  R  LEVEL (disembunyikan)
+
+INI PERBEDAAN UTAMA vs versi sebelumnya: tidak ada satu kolom "LABEL". Teks
+nama berpindah kolom sesuai LEVEL-nya (Program di C, Sub Program di D,
+Kegiatan di F, Item di G) — itulah yang membentuk tampilan bertingkat seperti
+di file asli. Nomor pun tersebar: Program di B, Sub Program di C, Kegiatan di
+E, huruf Item di F.
+
+LEVEL tetap disimpan di kolom R (disembunyikan) sebagai penanda internal.
+Sebetulnya level bisa ditebak dari kolom mana yang terisi, tapi tebakan itu
+rapuh (mis. teks Rincian yang kebetulan cuma satu huruf akan terbaca sebagai
+huruf Item), jadi levelnya disimpan eksplisit. Kolom R tersembunyi sehingga
+tampilan tetap identik dengan aslinya.
+
+Nomor (B/C/E/F), teks "Jumlah Biaya", dan TTL/SUB semuanya DIHITUNG OTOMATIS
+oleh resync() di lk_sheet.py tiap kali ada baris ditambah/diedit/dihapus —
+tidak pernah diketik manual.
 """
 from tab_config import MONTHS_ID  # reuse, jangan duplikat
 
@@ -42,22 +49,79 @@ LEVEL_LABELS = ["Program", "Sub Program", "Kegiatan", "Item", "Rincian"]
 LEVEL_SUBTOTAL = 6       # internal: baris "Jumlah Biaya", dikelola resync()
 SUBTOTAL_LABEL = "Jumlah Biaya"
 
-# FIELD_KEYS = kolom yang ditulis dari form tambah/edit, mulai kolom C (NO/ITEM
-# di kolom A/B dihitung terpisah, lihat sync_outline() di lk_sheet.py).
-FIELD_KEYS = ["level", "label", "tanggal", "kode", "volume", "satuan", "fk",
-              "kebutuhan", "unit_cost", "total"]
-HEADERS = ["NO", "ITEM", "LEVEL", "LABEL", "TANGGAL", "KODE", "VOLUME", "SATUAN",
-           "FK", "KEBUTUHAN", "UNIT COST", "TOTAL", "TTL/SUB"]
-N_COLS = len(HEADERS)
+# ---- posisi baris (1-based) ----
+TITLE_ROW1, TITLE_ROW2, TITLE_ROW3 = 1, 2, 3
+BLANK_ROW = 4
+HEADER_ROW1, HEADER_ROW2 = 5, 6
+FIRST_DATA_ROW = 7
 
-TITLE_ROW1 = 1
-TITLE_ROW2 = 2
-TITLE_ROW3 = 3
-HEADER_ROW = 4
-FIRST_DATA_ROW = 5
+# ---- posisi kolom (1-based) ----
+COL_SPACER = 1     # A
+COL_PROG_NO = 2    # B  nomor Program
+COL_PROG_NAME = 3  # C  nama Program  (kolom yang sama dipakai nomor Sub Program)
+COL_SUB_NO = 3     # C
+COL_SUB_NAME = 4   # D  (juga dipakai teks "Jumlah Biaya")
+COL_KEG_NO = 5     # E
+COL_KEG_NAME = 6   # F  (kolom yang sama dipakai huruf Item & teks Rincian)
+COL_ITEM_LETTER = 6  # F
+COL_ITEM_NAME = 7  # G
+COL_WIDE = 8       # H  sengaja dikosongkan, tempat teks meluber
+COL_TANGGAL = 9    # I
+COL_KODE = 10      # J
+COL_VOLUME = 11    # K
+COL_SATUAN = 12    # L
+COL_FK = 13        # M
+COL_KEBUTUHAN = 14 # N
+COL_UNIT_COST = 15 # O
+COL_TOTAL = 16     # P
+COL_TTL_SUB = 17   # Q
+COL_LEVEL = 18     # R  (disembunyikan)
 
-# Kolom yang diperlakukan sebagai angka (untuk format & parsing)
-NUMERIC_KEYS = {"volume", "unit_cost", "total"}
+N_COLS = COL_LEVEL
+
+# Kolom finansial yang diisi dari form tambah/edit -> nomor kolomnya.
+FIN_COLS = {
+    "tanggal": COL_TANGGAL, "kode": COL_KODE, "volume": COL_VOLUME,
+    "satuan": COL_SATUAN, "fk": COL_FK, "kebutuhan": COL_KEBUTUHAN,
+    "unit_cost": COL_UNIT_COST, "total": COL_TOTAL,
+}
+FIELD_KEYS = ["level", "label"] + list(FIN_COLS)
+
+# Kolom yang diperlakukan sebagai angka (untuk format sel)
+NUMERIC_COLS = [COL_VOLUME, COL_UNIT_COST, COL_TOTAL, COL_TTL_SUB]
+
+# Header 2 tingkat. Tiap entri: (teks, kolom_awal, kolom_akhir, baris_awal, baris_akhir)
+HEADER_CELLS = [
+    ("NO",                       COL_PROG_NO,  COL_PROG_NO,  HEADER_ROW1, HEADER_ROW2),
+    ("PROGRAM PENINGKATAN MUTU", COL_SUB_NO,   COL_SUB_NAME, HEADER_ROW1, HEADER_ROW2),
+    ("RINCIAN KEGIATAN",         COL_KEG_NO,   COL_WIDE,     HEADER_ROW1, HEADER_ROW2),
+    ("TANGGAL",                  COL_TANGGAL,  COL_TANGGAL,  HEADER_ROW1, HEADER_ROW2),
+    ("KODE",                     COL_KODE,     COL_KODE,     HEADER_ROW1, HEADER_ROW1),
+    ("KW",                       COL_KODE,     COL_KODE,     HEADER_ROW2, HEADER_ROW2),
+    ("RINCIAN",                  COL_VOLUME,   COL_TTL_SUB,  HEADER_ROW1, HEADER_ROW1),
+    ("VOLUME",                   COL_VOLUME,   COL_VOLUME,   HEADER_ROW2, HEADER_ROW2),
+    ("SATUAN",                   COL_SATUAN,   COL_SATUAN,   HEADER_ROW2, HEADER_ROW2),
+    ("FK",                       COL_FK,       COL_FK,       HEADER_ROW2, HEADER_ROW2),
+    ("KEBUTUHAN",                COL_KEBUTUHAN, COL_KEBUTUHAN, HEADER_ROW2, HEADER_ROW2),
+    ("UNIT COST",                COL_UNIT_COST, COL_UNIT_COST, HEADER_ROW2, HEADER_ROW2),
+    ("TOTAL",                    COL_TOTAL,    COL_TOTAL,    HEADER_ROW2, HEADER_ROW2),
+    ("TTL/SUB",                  COL_TTL_SUB,  COL_TTL_SUB,  HEADER_ROW2, HEADER_ROW2),
+]
+
+# Lebar kolom (px) — dikonversi dari lebar karakter di file asli (px ≈ char*7+5)
+COL_WIDTHS_PX = {
+    COL_SPACER: 9, COL_PROG_NO: 41, COL_SUB_NO: 45, COL_SUB_NAME: 172,
+    COL_KEG_NO: 34, COL_KEG_NAME: 37, COL_ITEM_NAME: 37, COL_WIDE: 312,
+    COL_TANGGAL: 95, COL_KODE: 69, COL_VOLUME: 65, COL_SATUAN: 84,
+    COL_FK: 52, COL_KEBUTUHAN: 93, COL_UNIT_COST: 103, COL_TOTAL: 120,
+    COL_TTL_SUB: 113,
+}
+
+# Font per peran — diambil persis dari file contoh asli.
+FONT_TITLE = ("Algerian", 20)
+FONT_HEADER = ("Bodoni MT", 12)
+FONT_PROGRAM = ("Arial Black", 12)
+FONT_BODY = ("Calibri", 12)
 
 
 def tab_name(bulan_num, tahun):
@@ -67,6 +131,32 @@ def tab_name(bulan_num, tahun):
 def academic_label(bulan_num, tahun):
     start = tahun if bulan_num >= 7 else tahun - 1
     return f"{start}/{start + 1}"
+
+
+def label_col(level, parent_level=None):
+    """Kolom tempat TEKS nama ditulis untuk sebuah level.
+    Rincian (5) mengikuti kolom teks induknya: di bawah Item -> G, selain itu -> F
+    (persis seperti di file asli)."""
+    if level == 1:
+        return COL_PROG_NAME
+    if level == 2:
+        return COL_SUB_NAME
+    if level == 3:
+        return COL_KEG_NAME
+    if level == 4:
+        return COL_ITEM_NAME
+    if level == LEVEL_SUBTOTAL:
+        return COL_SUB_NAME
+    return COL_ITEM_NAME if parent_level == 4 else COL_KEG_NAME
+
+
+# Semua kolom yang bisa memuat teks nama (dipakai saat membaca baris).
+LABEL_COLS = [COL_PROG_NAME, COL_SUB_NAME, COL_KEG_NAME, COL_ITEM_NAME]
+
+
+def number_col(level):
+    """Kolom tempat NOMOR/HURUF ditulis; None kalau level itu tidak bernomor."""
+    return {1: COL_PROG_NO, 2: COL_SUB_NO, 3: COL_KEG_NO, 4: COL_ITEM_LETTER}.get(level)
 
 
 def indent_px(level):
