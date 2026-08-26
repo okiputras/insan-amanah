@@ -235,43 +235,61 @@ def list_years(book, jenjang="SMP"):
     return sorted(years)
 
 
-def formula_arg_sep(book):
-    """Pemisah argumen formula sesuai locale spreadsheet.
+def saldo_awal_formula(prev_title, prev_year, prev_row):
+    """SALDO AWAL = saldo Juni tahun ajaran sebelumnya, sebagai REFERENSI SEL
+    LANGSUNG ke baris siswa tsb di tab `prev_title`.
 
-    Google Sheets mem-parsing input USER_ENTERED memakai locale spreadsheet.
-    Pada locale yang memakai koma sebagai pemisah desimal (mis. in_ID), pemisah
-    argumen fungsi adalah TITIK KOMA — menulis "VLOOKUP(a,b,c,d)" di sana
-    menghasilkan #ERROR! karena gagal di-parse."""
-    loc = (book.fetch_sheet_metadata(params={"fields": "properties.locale"})
-               .get("properties", {}).get("locale") or "")
-    return "," if loc.startswith("en") else ";"
+    Sengaja formula, bukan nilai statis: tab tahun lama bisa dibuat kosong dulu
+    lalu diisi belakangan — saldo awal tahun berikutnya harus ikut menyesuaikan.
 
+    Sengaja referensi langsung, bukan VLOOKUP lewat INDUK. Dua alasan, dua-duanya
+    pernah menggigit di data nyata:
+      1. INDUK tidak unik — 0229 dipakai dua siswa berbeda (RADITYA & RAISA).
+         VLOOKUP selalu mengembalikan kecocokan pertama, sehingga siswa kedua
+         diam-diam mewarisi saldo siswa pertama.
+      2. Locale spreadsheet in_ID memakai titik koma sebagai pemisah argumen,
+         jadi VLOOKUP dengan koma langsung jadi #ERROR!. Referensi sel tidak
+         punya argumen sama sekali, jadi bebas dari masalah locale.
 
-def saldo_awal_formula(prev_title, prev_year, row, sep=","):
-    """SALDO AWAL = saldo Juni tahun ajaran sebelumnya, dicocokkan lewat INDUK.
-
-    Sengaja FORMULA, bukan nilai statis: saat backfill, tab tahun lama dibuat
-    kosong dulu lalu transaksinya diisi belakangan — kalau saldo awal disimpan
-    sebagai angka hasil snapshot, tahun berikutnya akan diam-diam salah.
-    Dicocokkan lewat INDUK (bukan nomor baris) supaya tetap benar walau urutan
-    roster antar tahun berbeda. `sep` lihat formula_arg_sep()."""
-    last_col = C.last_saldo_col(prev_year)
-    idx = last_col - 2 + 1          # posisi kolom SALDO relatif terhadap kolom B
-    end = rowcol_to_a1(1, last_col)[:-1]
-    return (f"=IFERROR(VLOOKUP($B{row}{sep}'{prev_title}'!"
-            f"$B${C.FIRST_DATA_ROW}:${end}$1000{sep}{idx}{sep}FALSE){sep}0)")
+    Pencocokan baris dikerjakan di Python (lihat link_saldo_awal), bukan di sheet."""
+    col = rowcol_to_a1(1, C.last_saldo_col(prev_year))[:-1]
+    return f"='{prev_title}'!{col}{prev_row}"
 
 
-def link_saldo_awal(ws, prev_title, prev_year, sep=","):
-    """Isi kolom SALDO AWAL tab ini dengan formula yang menarik saldo Juni dari
-    tab `prev_title`. Hanya menyentuh kolom D — isi tab lainnya tidak diutak-atik."""
+def match_rows(roster_next, roster_prev):
+    """Pasangkan baris antar tahun: {row_next: row_prev}.
+
+    Dicocokkan lewat INDUK; kalau INDUK-nya kembar dipakai urutan kemunculan,
+    supaya tiap siswa dapat pasangannya sendiri (lihat catatan INDUK 0229)."""
+    sisa = {}
+    for r in roster_prev:
+        sisa.setdefault(r["induk"], []).append(r["row"])
+    out = {}
+    for r in roster_next:
+        antre = sisa.get(r["induk"])
+        if antre:
+            out[r["row"]] = antre.pop(0)
+    return out
+
+
+def link_saldo_awal(ws, prev_ws, prev_title, prev_year):
+    """Isi kolom SALDO AWAL tab ini dengan referensi ke saldo Juni tab
+    sebelumnya. Hanya menyentuh kolom D — isi tab lainnya tidak diutak-atik.
+    Siswa yang tidak punya pasangan di tahun sebelumnya diberi 0."""
     roster = read_roster_from_tab(ws)
     if not roster:
         return 0
+    pasangan = match_rows(roster, read_roster_from_tab(prev_ws))
     first, last = roster[0]["row"], roster[-1]["row"]
-    by_row = {r["row"] for r in roster}
-    values = [[saldo_awal_formula(prev_title, prev_year, r, sep) if r in by_row else ""]
-              for r in range(first, last + 1)]
+    punya = {r["row"] for r in roster}
+    values = []
+    for r in range(first, last + 1):
+        if r not in punya:
+            values.append([""])
+        elif r in pasangan:
+            values.append([saldo_awal_formula(prev_title, prev_year, pasangan[r])])
+        else:
+            values.append([0])
     ws.update(values, f"D{first}:D{last}", value_input_option="USER_ENTERED")
     return len(roster)
 

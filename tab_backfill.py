@@ -8,7 +8,7 @@ Tab dibuat KOSONG (struktur bulan Juli..Juni + roster siswa), siap diisi lewat
 menu Tabungan di aplikasi. Roster disalin dari tahun yang sudah ada di
 spreadsheet (tahun terlama), jadi daftar siswanya sama persis.
 
-SALDO AWAL antar tahun BARU dirantai memakai formula VLOOKUP ke tab tahun
+SALDO AWAL antar tahun BARU dirantai memakai referensi sel ke tab tahun
 sebelumnya — bukan angka hasil snapshot. Ini penting untuk backfill: tabnya
 dibuat kosong sekarang, transaksinya diisi belakangan, dan saldo awal tahun
 berikutnya harus ikut menyesuaikan sendiri. Tahun terlama dapat SALDO AWAL 0
@@ -61,9 +61,7 @@ def main():
         sys.exit(1)
 
     src_year = existing[0]
-    sep = SL.formula_arg_sep(book)
     print(f"Roster disalin dari T.A. {src_year}/{src_year + 1}")
-    print(f"Pemisah argumen formula: '{sep}' (mengikuti locale spreadsheet)")
 
     for kelas in kelas_list:
         try:
@@ -83,7 +81,7 @@ def main():
                 roster = [
                     (induk, nama,
                      SL.saldo_awal_formula(prev_title, prev_year,
-                                           C.FIRST_DATA_ROW + i, sep))
+                                           C.FIRST_DATA_ROW + i))
                     for i, (induk, nama) in enumerate(names)
                 ]
             SL.build_tab(book, kelas, year, roster, jenjang)
@@ -99,8 +97,9 @@ def main():
                 ws_next = book.worksheet(C.tab_name(kelas, nxt, jenjang))
             except Exception:
                 continue
-            n = SL.link_saldo_awal(ws_next, C.tab_name(kelas, prev_year, jenjang),
-                                   prev_year, sep)
+            prev_ws = book.worksheet(C.tab_name(kelas, prev_year, jenjang))
+            n = SL.link_saldo_awal(ws_next, prev_ws,
+                                   C.tab_name(kelas, prev_year, jenjang), prev_year)
             print(f"    ↳ SALDO AWAL {C.tab_name(kelas, nxt, jenjang)} disambungkan "
                   f"ke {C.tab_name(kelas, prev_year, jenjang)} ({n} siswa)")
 
@@ -121,7 +120,7 @@ def main():
     if bad:
         print()
         print("!! SALDO AWAL bermasalah (#ERROR) di:", ", ".join(bad))
-        print("   Formula gagal di-parse — cek pemisah argumen vs locale spreadsheet.")
+        print("   Formula gagal di-parse — cek nama tab & referensi selnya.")
         sys.exit(2)
     print("Cek SALDO AWAL: semua formula ter-parse dengan benar.")
 
