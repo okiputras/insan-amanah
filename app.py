@@ -492,8 +492,9 @@ def _tab_tahun_baru(pkey):
         years = TS.list_years(book, p["jenjang"])
         ny = max(years) + 1
         for k in p["kelas"]:
-            prev = book.worksheet(TC.tab_name(k, ny - 1, p["jenjang"]))
-            carried = TS.last_saldo_of_year(prev, ny - 1)
+            prev_title = TC.tab_name(k, ny - 1, p["jenjang"])
+            prev = book.worksheet(prev_title)
+            carried = TS.carry_roster(prev, prev_title, ny - 1)
             TS.build_tab(book, k, ny, carried, p["jenjang"])
         return redirect(url_for(p["ep_self"], year=ny,
                                 msg=f"✓ Tab T.A. {TC.academic_label(ny)} dibuat.", t="ok"), code=303)

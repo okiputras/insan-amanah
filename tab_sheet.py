@@ -294,6 +294,19 @@ def link_saldo_awal(ws, prev_ws, prev_title, prev_year):
     return len(roster)
 
 
+def carry_roster(prev_ws, prev_title, prev_year):
+    """Roster untuk membuat tab tahun ajaran BERIKUTNYA: induk & nama disalin
+    dari tahun sebelumnya, SALDO AWAL berupa referensi ke saldo Juni baris
+    siswa itu.
+
+    Sengaja formula, bukan angka dari last_saldo_of_year(): kalau transaksi
+    tahun sebelumnya dikoreksi setelah tab baru dibuat, saldo awal tahun baru
+    harus ikut menyesuaikan — bukan tertinggal diam-diam sebagai angka lama."""
+    return [(r["induk"], r["nama"],
+             saldo_awal_formula(prev_title, prev_year, r["row"]))
+            for r in read_roster_from_tab(prev_ws)]
+
+
 def last_saldo_of_year(ws, year):
     months = C.months_for_year(year)
     saldo_col = C.block_start_col(len(months) - 1) + 4
