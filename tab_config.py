@@ -10,7 +10,7 @@ Struktur tiap tab Google Sheet ("SMP <kelas> <tahun-ajaran>"), per TAHUN AJARAN:
 """
 from openpyxl.utils import get_column_letter
 
-START_YEAR = 2026
+START_YEAR = 2024          # tahun ajaran paling awal yang datanya dicatat
 START_MONTH = 7            # Juli = bulan pertama tahun ajaran
 
 MONTHS_ID = [
@@ -85,3 +85,8 @@ def saldo_formula(row, month_pos):
 
 def total_cols(start_year):
     return N_FIXED + len(months_for_year(start_year)) * COLS_PER_MONTH
+
+
+def last_saldo_col(start_year):
+    """Kolom SALDO bulan terakhir (Juni) pada tab tahun ajaran tsb."""
+    return block_start_col(len(months_for_year(start_year)) - 1) + 4

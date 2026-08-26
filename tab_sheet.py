@@ -121,6 +121,15 @@ def build_tab(book, kelas, year, roster, jenjang="SMP"):
     if induk_vals:
         last = C.FIRST_DATA_ROW + len(roster) - 1
         ws.update(induk_vals, f"B{C.FIRST_DATA_ROW}:B{last}", value_input_option="RAW")
+    # Nama bulan ditulis ulang RAW: lewat USER_ENTERED, "JULI 2024" ditelan
+    # Sheets sebagai tanggal (jadi angka serial) sehingga headernya berubah
+    # mengikuti format sel, bukan teks yang dimaksud.
+    month_row = [[C.month_label(m, year)] + [""] * (C.COLS_PER_MONTH - 1) for m in months]
+    if month_row:
+        flat = [v for blk in month_row for v in blk]
+        end = rowcol_to_a1(C.HEADER_MONTH_ROW, C.FIRST_MONTH_COL + len(flat) - 1)
+        start = rowcol_to_a1(C.HEADER_MONTH_ROW, C.FIRST_MONTH_COL)
+        ws.update([flat], f"{start}:{end}", value_input_option="RAW")
     _format_tab(book, ws, kelas, year)
     return ws
 
@@ -224,6 +233,47 @@ def list_years(book, jenjang="SMP"):
             except ValueError:
                 pass
     return sorted(years)
+
+
+def formula_arg_sep(book):
+    """Pemisah argumen formula sesuai locale spreadsheet.
+
+    Google Sheets mem-parsing input USER_ENTERED memakai locale spreadsheet.
+    Pada locale yang memakai koma sebagai pemisah desimal (mis. in_ID), pemisah
+    argumen fungsi adalah TITIK KOMA — menulis "VLOOKUP(a,b,c,d)" di sana
+    menghasilkan #ERROR! karena gagal di-parse."""
+    loc = (book.fetch_sheet_metadata(params={"fields": "properties.locale"})
+               .get("properties", {}).get("locale") or "")
+    return "," if loc.startswith("en") else ";"
+
+
+def saldo_awal_formula(prev_title, prev_year, row, sep=","):
+    """SALDO AWAL = saldo Juni tahun ajaran sebelumnya, dicocokkan lewat INDUK.
+
+    Sengaja FORMULA, bukan nilai statis: saat backfill, tab tahun lama dibuat
+    kosong dulu lalu transaksinya diisi belakangan — kalau saldo awal disimpan
+    sebagai angka hasil snapshot, tahun berikutnya akan diam-diam salah.
+    Dicocokkan lewat INDUK (bukan nomor baris) supaya tetap benar walau urutan
+    roster antar tahun berbeda. `sep` lihat formula_arg_sep()."""
+    last_col = C.last_saldo_col(prev_year)
+    idx = last_col - 2 + 1          # posisi kolom SALDO relatif terhadap kolom B
+    end = rowcol_to_a1(1, last_col)[:-1]
+    return (f"=IFERROR(VLOOKUP($B{row}{sep}'{prev_title}'!"
+            f"$B${C.FIRST_DATA_ROW}:${end}$1000{sep}{idx}{sep}FALSE){sep}0)")
+
+
+def link_saldo_awal(ws, prev_title, prev_year, sep=","):
+    """Isi kolom SALDO AWAL tab ini dengan formula yang menarik saldo Juni dari
+    tab `prev_title`. Hanya menyentuh kolom D — isi tab lainnya tidak diutak-atik."""
+    roster = read_roster_from_tab(ws)
+    if not roster:
+        return 0
+    first, last = roster[0]["row"], roster[-1]["row"]
+    by_row = {r["row"] for r in roster}
+    values = [[saldo_awal_formula(prev_title, prev_year, r, sep) if r in by_row else ""]
+              for r in range(first, last + 1)]
+    ws.update(values, f"D{first}:D{last}", value_input_option="USER_ENTERED")
+    return len(roster)
 
 
 def last_saldo_of_year(ws, year):
