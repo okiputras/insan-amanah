@@ -15,6 +15,8 @@ Aplikasi web dengan beberapa menu:
 3. **Data Validasi SMP** — sama seperti Data Validasi SD, tetapi pencocokannya
    **NO VA = kode sekolah + No. Pelanggan** (mis. `63713` + `0318` = `637130318`),
    karena laporan SMP memakai kode pelanggan pendek (4 digit), bukan NO VA penuh.
+   Kolom pertama file master boleh berisi NO VA penuh (`637130318`) maupun no induk
+   pendek (`0318`); keduanya dicoba saat mencari padanannya di master.
 4. **Tabungan SMP / Tabungan SD** — catat penyetoran/penarikan tabungan siswa
    langsung ke Google Sheet (1 spreadsheet per jenjang, 1 tab per kelas &
    tahun ajaran). Saldo dihitung otomatis lewat formula berjalan.
@@ -42,8 +44,9 @@ HTTP request/response biasa — hemat memori dan stabil di container kecil.
 
 **Data Validasi SD / SMP**
 - Upload 1 file master siswa (`.xlsx`) + 1 file laporan harian R-5401 (`.txt`).
-- Join per transaksi ke master; kolom BPP/Kegiatan/Tabungan mengikuti kolom bernama sama
-  di master siswa. Beda SD vs SMP **hanya** pada cara membentuk kunci join (lihat di atas).
+- Join per transaksi ke master. Kolom master dibaca berdasarkan **urutan**, bukan nama
+  judulnya: kolom 1 no siswa, 2 nama, 3 BPP, 4 kegiatan, 5 tabungan — jadi judul seperti
+  `KEG`/`TAB` tetap terbaca. Beda SD vs SMP **hanya** pada cara membentuk kunci join.
 - Status per transaksi: `Sesuai` (Nilai Bayar = Total Tagihan), `Kurang`, atau `Lebih`.
 - Unduh Excel (sheet Ringkasan + Transaksi) — sheet Transaksi **hanya memuat baris Sesuai**;
   Ringkasan tetap merangkum seluruh transaksi (termasuk Kurang/Lebih/tanpa data master).

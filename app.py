@@ -271,7 +271,9 @@ LEVELS = {
     "smp": {
         "nama": "SMP",
         "desc": ("Pencocokan tiap transaksi: <strong>NO VA = kode sekolah + No. Pelanggan</strong> "
-                 "(mis. 63713 + 0318 = 637130318), karena laporan SMP memakai kode pelanggan pendek."),
+                 "(mis. 63713 + 0318 = 637130318), karena laporan SMP memakai kode pelanggan pendek. "
+                 "Kolom pertama master boleh berisi NO VA penuh (637130318) maupun "
+                 "no induk pendek (0318) &mdash; keduanya dikenali."),
     },
 }
 
@@ -896,8 +898,9 @@ REKAP_PAGE = """<!doctype html>
     <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
   </div>
   <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
-  <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx: NO VA, NAMA, BPP, KEGIATAN,
-     TABUNGAN) dan <strong>laporan harian R-5401</strong> (.txt lebar-tetap). {{ cfg.desc|safe }}
+  <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx, 5 kolom berurutan:
+     no siswa, nama, BPP, kegiatan, tabungan &mdash; nama judul kolomnya bebas, yang dipakai urutannya)
+     dan <strong>laporan harian R-5401</strong> (.txt lebar-tetap). {{ cfg.desc|safe }}
      Hasil Excel hanya berisi transaksi berstatus <strong>Sesuai</strong> (Nilai Bayar = Total Tagihan).</p>
 
   <form class="up" method="post" action="{{ url_for('validasi_proses', level=level) }}" enctype="multipart/form-data">

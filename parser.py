@@ -87,7 +87,7 @@ def parse_bca_va(text):
     identik parse_report, agar reconcile_pembayaran bisa dipakai apa adanya.
 
     - No. Virtual Account '63713-0388' -> cust = '637130388' (VA penuh, tanpa '-').
-      reconcile mengenali cust yang sudah berupa VA penuh (lihat _resolve_no_va),
+      reconcile mengenali cust yang sudah berupa VA penuh (lihat _no_va_candidates),
       jadi cocok untuk level 'sd' maupun 'smp'.
     - nilai bayar = Total Transfer (uang yang benar-benar ditransfer).
     """

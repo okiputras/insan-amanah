@@ -64,26 +64,43 @@ STATUS_KURANG = "Kurang"
 STATUS_LEBIH = "Lebih"
 
 
-def _resolve_no_va(cust, kode, level):
-    """Tentukan NO VA (kunci master) dari 'No. Pelanggan' laporan.
+def _no_va_candidates(cust, kode, level):
+    """Kemungkinan kunci master untuk satu 'No. Pelanggan' laporan, urut prioritas.
 
     - level 'sd' : No. Pelanggan pada laporan SUDAH berupa NO VA penuh -> dipakai langsung.
-    - level 'smp': laporan hanya memuat kode pelanggan pendek (mis. '0318'); NO VA penuh
-      dibentuk dari kode sekolah + kode pelanggan 4 digit (mis. 63713 + 0318 = 637130318).
+    - level 'smp': laporan hanya memuat kode pelanggan pendek (mis. '0318'), jadi NO VA
+      penuh dibentuk dari kode sekolah + 4 digit itu (63713 + 0318 = 637130318).
+
+    Dikembalikan sebagai DAFTAR, bukan satu nilai, karena file master dipakai dalam dua
+    bentuk di lapangan: ada yang berkolom NO VA penuh (637130318) dan ada yang berkolom
+    NO INDUK pendek (0318). Memaksa satu bentuk membuat seluruh transaksi gagal cocok,
+    lalu tagihannya dianggap 0 dan semuanya dilaporkan sebagai selisih.
     """
     c = str(cust or "").strip()
     if not c.isdigit():
-        return None
-    if level == "smp":
-        k = str(kode or "").strip()
-        if not k.isdigit():
-            return None
+        return []
+    if level != "smp":
+        return [int(c)]
+    out = []
+    k = str(kode or "").strip()
+    if k.isdigit():
         # Bila cust sudah berupa NO VA penuh (diawali kode sekolah, mis. dari laporan
         # BCA VA '63713-0388' -> '637130388'), pakai langsung; jangan diprefix lagi.
-        if len(c) > len(k) and c.startswith(k):
-            return int(c)
-        return int(k + c.zfill(4))
-    return int(c)
+        out.append(int(c) if (len(c) > len(k) and c.startswith(k)) else int(k + c.zfill(4)))
+    short = int(c)
+    if short not in out:
+        out.append(short)          # master memakai NO INDUK pendek
+    return out
+
+
+def _match_master(cust, kode, level, master):
+    """-> (no_va, baris master) — kandidat pertama yang benar-benar ada di master.
+    Kalau tidak ada yang cocok, kembalikan kandidat utama dengan baris None."""
+    cands = _no_va_candidates(cust, kode, level)
+    for key in cands:
+        if key in master:
+            return key, master[key]
+    return (cands[0] if cands else None), None
 
 
 def reconcile_pembayaran(report_rows, master, kode=None, level="sd"):
@@ -97,8 +114,7 @@ def reconcile_pembayaran(report_rows, master, kode=None, level="sd"):
     out = []
     for row in report_rows:
         no, cust, nama_rpt, nilai, tgl, waktu, jam, lok, k1, k2 = row
-        no_va = _resolve_no_va(cust, kode, level)
-        m = master.get(no_va) if no_va is not None else None
+        no_va, m = _match_master(cust, kode, level, master)
         bpp = m["BPP"] if m else 0
         kegiatan = m["KEGIATAN"] if m else 0
         tabungan = m["TABUNGAN"] if m else 0
