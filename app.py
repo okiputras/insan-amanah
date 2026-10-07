@@ -275,7 +275,8 @@ LEVELS = {
     "sd": {
         "nama": "SD",
         "desc": ("Pencocokan tiap transaksi: <strong>No. Pelanggan (laporan) = NO VA (master)</strong> "
-                 "secara langsung."),
+                 "secara langsung. Setelah diproses, pembayaran di laporan bisa langsung dicatat ke menu "
+                 "<strong>Pembayaran SD</strong>."),
     },
     "smp": {
         "nama": "SMP",
@@ -341,7 +342,13 @@ def validasi_proses(level):
     tgl = (meta.get("tanggal_label") or "").replace("/", "")
     dname = f"Validasi_{cfg['nama']}_Sesuai_R-5401_{meta.get('kode') or 'NA'}_{tgl or 'NA'}.xlsx"
     xbytes = wb_to_bytes(build_recon_workbook(rows, meta, only_sesuai=True))
-    token = _store({"rekap": (dname, xbytes)})
+    payload, bayar = {"rekap": (dname, xbytes)}, None
+    if level == "sd":
+        # Laporan disimpan bersama token supaya tombol "Catat ke Pembayaran SD" tidak perlu
+        # upload ulang; pencatatannya sendiri dihitung ulang saat tombol ditekan.
+        payload["va"] = {"meta": meta, "rows": report_rows}
+        bayar = _va_pratinjau(meta, report_rows)
+    token = _store(payload)
 
     result = {
         "master_name": f_master.filename, "laporan_name": f_laporan.filename, "meta": meta,
@@ -351,8 +358,32 @@ def validasi_proses(level):
         "n_unmatched": sum(1 for r in rows if not r["matched"]),
         "preview": preview, "preview_more": max(0, len(shown) - len(preview)),
     }
-    return render_template_string(REKAP_PAGE, level=level, cfg=cfg,
+    return render_template_string(REKAP_PAGE, level=level, cfg=cfg, bayar=bayar,
                                   result=result, token=token, error=None, active="validasi_" + level)
+
+
+def _va_pratinjau(meta, rows):
+    """Kotak "Catat ke Pembayaran SD" di hasil Data Validasi SD. Gagal membaca Sheet tidak
+    boleh menggagalkan validasinya, jadi error hanya tampil di kotak ini."""
+    if BSheet is None or not BYR.SPREADSHEET_ID:
+        return {"error": "Menu Pembayaran SD belum siap: " + (_BYR_IMPORT_ERR or "SPREADSHEET_ID kosong.")}
+    alasan = BYR.alasan_tolak_va(meta, rows)
+    if alasan:                         # laporan SMP / sebelum batas: tidak perlu membaca Sheet
+        return {"error": None, "alasan": alasan}
+    try:
+        book = BSheet.open_book()
+        r = BYR.rencana_va(meta, rows, BSheet.baca_siswa(book), set(BSheet.nominal_per_kunci(book)))
+    except Exception as e:  # noqa
+        return {"error": str(e)}
+    baris = r["baris"]
+    for b in baris:
+        b.update(nilai_str=ribuan(b["nilai"]), bk_str=ribuan(b["bpp"] + b["katering"]),
+                 keg_str=ribuan(b["kegiatan"]))
+    jumlah = lambda st: sum(1 for b in baris if b["status"] == st)
+    return {"error": None, "alasan": None, "baris": baris,
+            "tanggal": r["tanggal_laporan"].strftime("%d/%m/%Y"),
+            "n_baru": jumlah("baru"), "n_sudah": jumlah("sudah"), "n_cek": jumlah("cek"),
+            "total_baru": rupiah(sum(b["nilai"] for b in baris if b["status"] == "baru"))}
 
 
 @app.route("/rekap")
@@ -696,7 +727,8 @@ def _bayar_ctx(cek=False, per=None, rombel="", msg=None, msgtype="info"):
                          if BYR and BYR.SPREADSHEET_ID else "#"),
            "bulan_opsi": [], "rombel_opsi": [], "per": per, "rombel": rombel or "",
            "label_per": "", "hasil": None, "token": None, "review": [], "roster": [],
-           "roster_json": "{}", "today": "", "total_menunggak": "", "nonce": secrets.token_hex(8)}
+           "roster_json": "{}", "today": "", "total_menunggak": "", "nonce": secrets.token_hex(8),
+           "tampil_va": False, "va_terakhir": "", "va_mulai": ""}
     if BSheet is None:
         ctx["error"] = "Modul Pembayaran belum siap: " + (_BYR_IMPORT_ERR or "gspread belum terpasang.")
         return ctx
@@ -729,8 +761,16 @@ def _bayar_ctx(cek=False, per=None, rombel="", msg=None, msgtype="info"):
         today=(datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d"),
     )
     if cek:
-        totals = BYR.total_per_siswa(BSheet.baca_pembayaran(book))
+        pembayaran = BSheet.baca_pembayaran(book)
+        totals = BYR.total_per_siswa(pembayaran)
         hasil = BYR.cek(siswa, totals, per, rombel or None)
+        # Sejak LAPORAN_VA_MULAI pembayaran VA baru terhitung setelah laporannya diupload di
+        # Data Validasi SD; tanpa keterangan ini siswa yang sudah bayar VA tampak menunggak.
+        urutan = BYR.bulan_list()
+        va = BYR.laporan_va_terakhir(pembayaran)
+        ctx.update(tampil_va=urutan.index(per) >= urutan.index(BYR.LAPORAN_VA_MULAI.month),
+                   va_terakhir=va.strftime("%d/%m/%Y") if va else "",
+                   va_mulai=BYR.LAPORAN_VA_MULAI.strftime("%d/%m/%Y"))
         for r in hasil["menunggak"] + hasil["bulan_ini"]:
             r["kurang_str"] = ribuan(r["kurang"])
             r["tagihan_str"] = ribuan(r["tagihan_bulan_ini"])
@@ -857,6 +897,48 @@ def pembayaran_review_abaikan():
             raise RuntimeError("Modul Pembayaran belum siap.")
         BSheet.abaikan_review(BSheet.open_book(), request.form.get("kunci", ""))
         return _bayar_redirect("✓ Baris diabaikan (tidak dicatat sebagai pembayaran).", "ok")
+    except Exception as e:  # noqa
+        return _bayar_redirect(str(e), "err")
+
+
+@app.route("/pembayaran/va/catat", methods=["POST"])
+def pembayaran_va_catat():
+    """Tombol "Catat ke Pembayaran SD" di hasil Data Validasi SD."""
+    try:
+        if BSheet is None or not BYR.SPREADSHEET_ID:
+            raise RuntimeError("Modul Pembayaran belum siap.")
+        entry = _get(request.form.get("token", ""))
+        va = entry.get("va") if entry else None
+        if not va:
+            raise ValueError("Data laporan sudah kedaluwarsa (lebih dari 30 menit) atau server dimulai "
+                             "ulang. Upload ulang laporannya di Data Validasi SD.")
+        book = BSheet.open_book()
+        siswa = BSheet.baca_siswa(book)
+        # Dihitung ulang terhadap isi Sheet saat ini, bukan memakai hasil pratinjau: klik ganda
+        # atau laporan yang sama dicatat dari tab lain tidak boleh mendobelkan uang.
+        r = BYR.rencana_va(va["meta"], va["rows"], siswa, set(BSheet.nominal_per_kunci(book)))
+        if r["alasan"]:
+            raise ValueError(r["alasan"])
+        tgl = r["tanggal_laporan"]
+        baru = [b for b in r["baris"] if b["status"] == "baru"]
+        cek = [b for b in r["baris"] if b["status"] == "cek"]
+        BSheet.catat_banyak(book, [{
+            "tanggal": b["tanggal"], "induk": b["induk"], "nama": b["nama"], "bpp": b["bpp"],
+            "katering": b["katering"], "kegiatan": b["kegiatan"], "tabungan": 0,
+            "sumber": f"VA {tgl.isoformat()}", "kunci": b["kunci"],
+            "catatan": (f"laporan R-5401 {tgl:%d/%m/%Y}, pukul {b['waktu']}; dipecah {b['pecahan']}"
+                        + (f"; berita: {b['berita']}" if b["berita"] else ""))} for b in baru])
+        BSheet.tambah_review(book, [{
+            "tanggal": b["tanggal"], "nama": b["nama_laporan"], "induk_tercatat": b["induk"],
+            "bpp": b["bpp"], "katering": b["katering"], "kegiatan": b["kegiatan"], "tabungan": 0,
+            "masalah": f"VA {tgl:%d/%m/%Y} ({b['pecahan']}): {b['masalah']}",
+            "saran": b["induk"] if b["induk"] in siswa else "", "kunci": b["kunci"]} for b in cek])
+        n_sudah = len(r["baris"]) - len(baru) - len(cek)
+        return _bayar_redirect(
+            f"✓ Laporan VA {tgl:%d/%m/%Y}: {len(baru)} pembayaran dicatat "
+            f"({rupiah(sum(b['nilai'] for b in baru))})"
+            + (f", {n_sudah} sudah tercatat sebelumnya" if n_sudah else "")
+            + (f", {len(cek)} masuk Perlu Dicek" if cek else "") + ".", "ok", cek="1")
     except Exception as e:  # noqa
         return _bayar_redirect(str(e), "err")
 
@@ -1159,6 +1241,58 @@ REKAP_PAGE = """<!doctype html>
 
       <a class="btn dl" href="{{ url_for('dl_rekap', token=token) }}">&#11015; Unduh Excel (hanya Sesuai)</a>
     </div>
+
+    {% if bayar %}
+    <div class="card" id="bayarSD">
+      <div class="chead">
+        <h2>&#128179; Catat ke Pembayaran SD</h2>
+        {% if bayar.tanggal %}<span class="badge">laporan {{ bayar.tanggal }}</span>{% endif %}
+      </div>
+      {% if bayar.error %}
+        <div class="alert err">&#9888; {{ bayar.error }}</div>
+      {% elif bayar.alasan %}
+        <div class="alert info">{{ bayar.alasan }}</div>
+      {% else %}
+        <p class="sub" style="margin:0 0 12px;">Semua transaksi laporan ini (bukan hanya yang Sesuai) adalah
+           uang masuk. Nominalnya dipecah otomatis menjadi BPP+katering dan kegiatan menurut tagihan bulanan
+           siswa di tab SISWA. Transaksi yang sudah pernah dicatat dilewati, jadi laporan yang sama aman
+           diupload ulang.</p>
+        <div class="metrics">
+          <div class="metric"><div class="k">Siap dicatat</div><div class="v">{{ bayar.n_baru }}</div></div>
+          <div class="metric"><div class="k">Nominal siap dicatat</div><div class="v">{{ bayar.total_baru }}</div></div>
+          <div class="metric"><div class="k">Sudah tercatat</div><div class="v">{{ bayar.n_sudah }}</div></div>
+          <div class="metric"><div class="k">Perlu dicek</div><div class="v">{{ bayar.n_cek }}</div></div>
+        </div>
+        <div class="tblwrap" style="max-height:440px; overflow:auto;">
+          <table>
+            <thead><tr><th>Induk</th><th>Nama</th><th>Rombel</th><th>Tgl</th><th>Waktu</th>
+              <th>Nilai</th><th>BPP+katering</th><th>Kegiatan</th><th>Keterangan</th></tr></thead>
+            <tbody>
+              {% for b in bayar.baris %}
+              <tr class="{{ 'warn' if b.status == 'cek' else '' }}"{% if b.status == 'sudah' %} style="color:#8a979c;"{% endif %}>
+                <td>{{ b.induk }}</td><td>{{ b.nama }}</td><td>{{ b.rombel }}</td>
+                <td>{{ b.tanggal }}</td><td>{{ b.waktu }}</td>
+                <td class="num">{{ b.nilai_str }}</td>
+                <td class="num">{{ b.bk_str if b.status != 'sudah' else '' }}</td>
+                <td class="num">{{ b.keg_str if b.status != 'sudah' else '' }}</td>
+                <td>{% if b.status == 'sudah' %}sudah tercatat{% elif b.status == 'cek' %}&#9888; perlu dicek: {{ b.masalah }}{% else %}{{ b.pecahan }}{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if bayar.n_baru or bayar.n_cek %}
+        <form method="post" action="{{ url_for('pembayaran_va_catat') }}"
+              onsubmit="var b = this.querySelector('button'); if (b.disabled) return false; b.disabled = true; b.textContent = 'Mencatat…'; return true;">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button class="btn primary" type="submit">&#128190; Catat {{ bayar.n_baru }} pembayaran ke Pembayaran SD{% if bayar.n_cek %} (+{{ bayar.n_cek }} ke Perlu Dicek){% endif %}</button>
+        </form>
+        {% else %}
+          <div class="alert info">Semua transaksi di laporan ini sudah tercatat di Pembayaran SD.</div>
+        {% endif %}
+      {% endif %}
+    </div>
+    {% endif %}
   {% endif %}
 
   <hr class="sep">
@@ -1638,6 +1772,14 @@ BAYAR_PAGE = """<!doctype html>
     <div class="metric"><div class="k">Belum bayar {{ label_per }}</div><div class="v">{{ hasil.bulan_ini|length }}</div></div>
     <div class="metric"><div class="k">Lunas s/d {{ label_per }}</div><div class="v">{{ hasil.jumlah_lunas }}</div></div>
   </div>
+  {% if tampil_va %}
+  <div class="alert {{ 'info' if va_terakhir else 'warn' }}" style="margin-bottom:16px;">
+    {% if va_terakhir %}Pembayaran VA tercatat s/d laporan bank <strong>{{ va_terakhir }}</strong>.
+    {% else %}&#9888; <strong>Belum ada laporan VA sejak {{ va_mulai }} yang dicatat</strong> &mdash; siswa yang
+       membayar lewat VA masih tampak belum bayar.{% endif %}
+    Laporan yang lebih baru diupload di <a href="{{ url_for('validasi', level='sd') }}">Data Validasi SD</a>.
+  </div>
+  {% endif %}
 
   <div class="combined">
     <h2>&#9888; Menunggak ({{ hasil.menunggak|length }})</h2>
@@ -1687,6 +1829,9 @@ BAYAR_PAGE = """<!doctype html>
 
   <div class="combined" id="formCatat">
     <h2>&#9997; Catat pembayaran</h2>
+    <p class="sub" style="margin:0 0 12px;">Untuk transfer &amp; tunai. Pembayaran lewat VA tidak perlu diketik:
+       upload laporan harian R-5401 di <a href="{{ url_for('validasi', level='sd') }}">Data Validasi SD</a>
+       lalu klik <em>Catat ke Pembayaran SD</em>.</p>
     <form method="post" action="{{ url_for('pembayaran_simpan') }}" onsubmit="return kirim(this);">
       <input type="hidden" name="nonce" value="{{ nonce }}">
       <input type="hidden" name="cek" value="{{ '1' if hasil else '' }}">

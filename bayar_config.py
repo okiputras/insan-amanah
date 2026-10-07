@@ -23,6 +23,7 @@ pembagiannya keliru (1.800.000 terbagi 1.600.000 + 200.000, seharusnya 1.400.000
 BPP + katering + kegiatan.
 """
 import datetime as dt
+import re
 
 from tab_config import MONTHS_ID, months_for_year
 
@@ -44,6 +45,14 @@ HDR_REVIEW = ["TANGGAL", "NAMA TERCATAT", "INDUK TERCATAT", "BPP", "KATERING", "
 STATUS_AKTIF, STATUS_PINDAH = "AKTIF", "PINDAH"
 KANTONG = ("bk", "keg")
 LABEL_KANTONG = {"bk": "BPP+katering", "keg": "kegiatan"}
+
+# Pembayaran VA dicatat dari laporan harian bank (R-5401) yang diupload di menu Data
+# Validasi SD; No. Pelanggan di laporan SD adalah No Induk. Laporan bertanggal sebelum
+# LAPORAN_VA_MULAI sudah tercakup impor Excel PEMASUKAN BPP (blok harian di Excel itu
+# salinan laporan VA), jadi dilewati. Batasnya TANGGAL LAPORAN, bukan tanggal transaksi:
+# laporan tanggal X memuat transaksi sejak +-21.00 hari sebelumnya.
+KODE_VA = "64219"
+LAPORAN_VA_MULAI = dt.date(2026, 10, 1)
 
 # Aturan khusus T.A. 2026/2027 untuk siswa baru (kelas 1) di bulan Juli: BPP & katering
 # Juli sudah dibayar saat daftar ulang/PPDB (di luar buku ini), sedangkan kegiatan Juli
@@ -186,3 +195,122 @@ def bulan_lunas(siswa, bayar):
             break
         terakhir = b
     return terakhir
+
+
+# ---------------------------------------------------------------- laporan VA bank
+def _rb(n):
+    return f"{int(n):,}".replace(",", ".")
+
+
+def pecah_nominal(siswa, nilai):
+    """Nominal VA -> (bpp, katering, kegiatan, keterangan, banyak_kemungkinan) atau None.
+
+    Laporan bank hanya memuat total. Dicari a x (BPP+katering) + b x kegiatan = nilai
+    (a, b = 0..12 bulan); bila ada beberapa, dipilih yang jumlah bulannya paling seimbang.
+    Cara ini mereproduksi pembagian BPP+katering / kegiatan yang ditulis sekolah di Excel
+    untuk 106 dari 106 transaksi VA 6-9 Agustus 2026 (bayar rangkap, BPP saja, kegiatan
+    kelas 1 dirangkap), dan dengan tarif T.A. 2026/2027 tidak ada nominal lazim (bulan
+    penuh / BPP saja / kegiatan saja) yang punya dua pecahan."""
+    bpp, kat, keg = (int(siswa.get(k) or 0) for k in ("bpp", "katering", "kegiatan"))
+    bk = bpp + kat
+    sol = [(a, b) for a in range(13 if bk else 1) for b in range(13 if keg else 1)
+           if (a or b) and a * bk + b * keg == nilai]
+    if not sol:
+        return None
+    a, b = min(sol, key=lambda x: (abs(x[0] - x[1]), -x[0]))
+    ket = " + ".join(t for t in (f"{a}× BPP+katering" if a else "", f"{b}× kegiatan" if b else "") if t)
+    return a * bpp, a * kat, b * keg, ket, len(sol)
+
+
+def induk_dari_va(cust):
+    """No. Pelanggan laporan -> No Induk. R-5401 SD sudah memuat No Induk ('2551'); format
+    BCA VA memuat VA penuh (kode biller + induk), jadi kode billernya dibuang."""
+    c = re.sub(r"\D", "", str(cust or ""))
+    if len(c) > len(KODE_VA) and c.startswith(KODE_VA):
+        c = c[len(KODE_VA):]
+    return str(int(c)) if c else ""
+
+
+def tanggal_laporan(meta, rows):
+    """Tanggal di kepala laporan ('06/08/2026'); cadangan: tanggal transaksi terakhir."""
+    try:
+        d, m, y = (int(x) for x in str(meta.get("tanggal_label", "")).split("/"))
+        return dt.date(y, m, d)
+    except ValueError:
+        return max((r[4] for r in rows), default=None)
+
+
+def alasan_tolak_va(meta, rows):
+    """Alasan sebuah laporan tidak boleh dicatat sama sekali, atau None. Tanpa akses Sheet."""
+    if str(meta.get("kode") or "").strip() != KODE_VA:
+        return (f"Laporan ini milik kode biller {meta.get('kode') or '?'}, bukan SD ({KODE_VA}), "
+                "jadi tidak dicatat ke Pembayaran SD.")
+    tgl = tanggal_laporan(meta, rows)
+    if tgl is None:
+        return "Tanggal laporan tidak terbaca."
+    if tgl < LAPORAN_VA_MULAI:
+        akhir = LAPORAN_VA_MULAI - dt.timedelta(days=1)
+        return (f"Laporan {tgl:%d/%m/%Y} sudah tercakup impor Excel PEMASUKAN BPP (laporan s/d "
+                f"{akhir:%d/%m/%Y}); tidak dicatat lagi supaya tidak dobel.")
+    return None
+
+
+def rencana_va(meta, rows, siswa, kunci_ada):
+    """Laporan VA harian (hasil parser.parse_laporan) -> rencana pencatatan ke buku besar.
+
+    -> {"tanggal_laporan", "alasan": teks bila laporan tidak boleh dicatat sama sekali,
+        "baris": [dict per transaksi dengan status "baru" | "sudah" | "cek"]}
+    KUNCI per transaksi = tanggal-jam + induk + nominal, jadi laporan yang sama (atau yang
+    tumpang tindih) diupload ulang tidak mendobelkan uang. Dipanggil lagi saat tombol Catat
+    ditekan, terhadap isi Sheet terbaru, supaya klik ganda pun aman."""
+    out = {"tanggal_laporan": tanggal_laporan(meta, rows), "alasan": alasan_tolak_va(meta, rows),
+           "baris": []}
+    if out["alasan"]:
+        return out
+    dilihat = set()
+    for _no, cust, nama_lap, nilai, tgl, waktu, _jam, lok, k1, k2 in rows:
+        nilai = int(round(nilai))
+        induk = induk_dari_va(cust)
+        kunci = f"VA:{tgl:%Y%m%d}-{waktu:%H%M%S}:{induk}:{nilai}"
+        s = siswa.get(induk)
+        b = {"kunci": kunci, "tanggal": tgl.isoformat(), "waktu": waktu.strftime("%H:%M:%S"),
+             "induk": induk, "no_pelanggan": str(cust).strip(), "nama_laporan": str(nama_lap).strip(),
+             "nama": s["nama"] if s else str(nama_lap).strip(), "rombel": s["rombel"] if s else "",
+             "nilai": nilai, "lokasi": str(lok or "").strip(),
+             "berita": " / ".join(x.strip() for x in (k1, k2) if x and x.strip(" -")),
+             "bpp": 0, "katering": 0, "kegiatan": 0, "pecahan": "", "masalah": "", "status": "baru"}
+        if kunci in kunci_ada or kunci in dilihat:
+            b["status"] = "sudah"
+        elif s is None:
+            b.update(status="cek", bpp=nilai, pecahan="sementara: semua ke BPP",
+                     masalah=f"No. Pelanggan {cust} tidak ada di tab {TAB_SISWA}")
+        else:
+            p = pecah_nominal(s, nilai)
+            if p:
+                b.update(bpp=p[0], katering=p[1], kegiatan=p[2], pecahan=p[3])
+            else:
+                # Pecahan sementara untuk ditinjau: bulan penuh BPP+katering dulu, sisanya kegiatan.
+                bk = s["bpp"] + s["katering"]
+                a = min(nilai // bk, 12) if bk else 0
+                b.update(bpp=a * s["bpp"], katering=a * s["katering"], kegiatan=nilai - a * bk,
+                         pecahan=(f"sementara: {a}× BPP+katering, sisa ke kegiatan" if a
+                                  else "sementara: semua ke kegiatan"))
+            if s["status"] == STATUS_PINDAH:
+                b.update(status="cek", masalah=f"{s['nama']} berstatus PINDAH di tab {TAB_SISWA}")
+            elif not p:
+                b.update(status="cek", masalah=(
+                    f"nominal {_rb(nilai)} bukan kelipatan tagihan (BPP+katering {_rb(s['bpp'] + s['katering'])}, "
+                    f"kegiatan {_rb(s['kegiatan'])}) — mungkin termasuk tabungan atau cicilan; "
+                    "ubah angkanya di tab PERLU DICEK bila perlu, lalu Simpan"))
+            elif p[4] > 1:
+                b.update(status="cek", masalah="nominal bisa dipecah lebih dari satu cara — periksa pecahannya")
+        dilihat.add(kunci)
+        out["baris"].append(b)
+    return out
+
+
+def laporan_va_terakhir(pembayaran):
+    """Tanggal laporan VA terbaru yang sudah dicatat (dari SUMBER "VA yyyy-mm-dd"), atau None.
+    Ditampilkan di hasil Cek: pembayaran VA dari laporan yang belum diupload belum terhitung."""
+    tgl = [p["sumber"][3:13] for p in pembayaran if re.match(r"VA \d{4}-\d{2}-\d{2}", p.get("sumber", ""))]
+    return dt.date.fromisoformat(max(tgl)) if tgl else None

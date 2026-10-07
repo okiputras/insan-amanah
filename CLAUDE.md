@@ -55,8 +55,10 @@ bytes sit in `app._STORE`, an in-memory dict keyed by a random token with a 30-m
 TTL and a 20-entry cap. This is why the deploy is pinned to `--workers 1`: a second
 worker would not see the token, and the links break on every restart.
 
-**Google-Sheets menus** (`/tabungan`, `/tabungan-sd`, `/laporan-keuangan`) keep no
-local state — the spreadsheet is the database, and every request reads it fresh.
+**Google-Sheets menus** (`/tabungan`, `/tabungan-sd`, `/laporan-keuangan`, `/pembayaran`)
+keep no local state — the spreadsheet is the database, and every request reads it fresh.
+The one bridge between the halves: Data Validasi SD offers to record the uploaded bank
+report into Pembayaran SD (see below).
 `tab_*` and `lk_*` are imported with a `try/except` in `app.py`, so if gspread or the
 credentials are missing the other menus still work and only these pages show an error.
 
@@ -197,6 +199,21 @@ DICEK` for a human to resolve in the app. Every row carries a `KUNCI`
 (`<month file>:<block column>:<row>`), so re-running the import never double-counts —
 but it can't detect the same payment entered both in the app and in a later Excel
 import, so don't import a month that is already being recorded in the app.
+
+From `LAPORAN_VA_MULAI` (1 Oct 2026) on, VA payments come from the bank's daily R-5401
+report uploaded in Data Validasi SD: the result page previews `rencana_va()` and a button
+posts the report (kept with the download token) to `/pembayaran/va/catat`, which
+recomputes the plan against the live sheet before appending, so a double click or a
+re-upload records nothing twice. Transfers are typed in the app; `bayar_import.py`
+refuses workbooks from that month on, since their daily blocks are those same reports.
+In the SD report No. Pelanggan *is* the INDUK. The bank gives only a total, so
+`pecah_nominal()` splits it as a×(BPP+katering) + b×kegiatan from the student's monthly
+rate — this reproduced the school's own split for all 106 VA transactions of 6–9 Aug;
+anything that doesn't decompose uniquely, a PINDAH student or an unknown INDUK goes to
+`PERLU DICEK`. The cutover compares the **report** date, not the transaction date: a
+report dated X covers roughly 21:00 the day before to 21:00 on X, and the school's Excel
+daily blocks are copies of whole reports. `KUNCI` for these rows is
+`VA:<yyyymmdd-hhmmss>:<induk>:<nilai>`.
 
 ## Conventions
 

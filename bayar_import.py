@@ -317,6 +317,12 @@ def main():
 
     masuk, review, blok_beda, blok_janggal, beda = [], [], [], [], []
     for path in bayar_paths:
+        bln, th, label_file = _bulan_file(path)
+        if (th, bln) >= (C.LAPORAN_VA_MULAI.year, C.LAPORAN_VA_MULAI.month):
+            print(f"  {label_file:<15} DILEWATI — sejak {C.label_bulan(C.LAPORAN_VA_MULAI.month)} pembayaran VA "
+                  "dicatat dari laporan bank (Data Validasi SD) dan transfer diinput di aplikasi; "
+                  "mengimpor Excel bulan ini akan mendobelkan uang.")
+            continue
         label_file, rows, info = baca_pembayaran(path)
         n_induk = n_nama = n_rev = n_lewat = 0
         for p in rows:

@@ -11,7 +11,8 @@ Aplikasi web dengan beberapa menu:
    **master siswa** (`.xlsx`: NO VA, NAMA, BPP, KEGIATAN, TABUNGAN), menghitung Total
    Tagihan/Nilai Bayar/Selisih/Status per transaksi, lalu menghasilkan Excel yang
    **hanya berisi transaksi berstatus Sesuai**. Pencocokan: **No. Pelanggan = NO VA**
-   secara langsung.
+   secara langsung. Setelah diproses, semua transaksi laporan bisa langsung dicatat ke
+   menu **Pembayaran SD** (pratinjau + tombol *Catat*).
 3. **Data Validasi SMP** — sama seperti Data Validasi SD, tetapi pencocokannya
    **NO VA = kode sekolah + No. Pelanggan** (mis. `63713` + `0318` = `637130318`),
    karena laporan SMP memakai kode pelanggan pendek (4 digit), bukan NO VA penuh.
@@ -28,9 +29,11 @@ Aplikasi web dengan beberapa menu:
 6. **Pembayaran SD** — tombol **"Cek siapa yang belum bayar"** menampilkan siswa yang
    belum melunasi BPP + katering + kegiatan sejak Juli sampai bulan yang dipilih,
    dipisah menjadi *Menunggak* (bulan-bulan lalu) dan *Belum bayar bulan ini*, plus
-   unduh Excel. Pembayaran baru dicatat lewat aplikasi (isi nominal; pembayaran beberapa
-   bulan sekaligus otomatis menutup bulan tertua lebih dulu). Data Juli–September
-   diimpor sekali dari Excel pemasukan BPP sekolah dengan `bayar_import.py`.
+   unduh Excel. Pembayaran beberapa bulan sekaligus otomatis menutup bulan tertua lebih
+   dulu. Sumber data: Juli–September diimpor sekali dari Excel pemasukan BPP sekolah
+   (`bayar_import.py`); mulai Oktober 2026 pembayaran **VA** dicatat dari laporan bank
+   harian lewat menu Data Validasi SD (nominal dipecah otomatis), sedangkan **transfer &
+   tunai** diketik di form Catat pembayaran.
 
 Menu 4–6 butuh kredensial Google service account (`sa-sheet.json` atau env
 `GOOGLE_SERVICE_ACCOUNT_JSON`) yang sudah di-share sebagai Editor ke

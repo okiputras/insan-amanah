@@ -232,7 +232,8 @@ def selesaikan_review(book, kunci, induk, nama):
     catat_pembayaran(book, {
         "tanggal": item["tanggal"], "induk": induk, "nama": nama,
         "bpp": item["bpp"], "katering": item["katering"], "kegiatan": item["kegiatan"],
-        "tabungan": item["tabungan"], "sumber": "impor (ditinjau)", "kunci": kunci,
+        "tabungan": item["tabungan"], "kunci": kunci,
+        "sumber": "VA (ditinjau)" if kunci.startswith("VA:") else "impor (ditinjau)",
         "catatan": f"tercatat sbg '{item['nama']}' / induk '{item['induk_tercatat']}' — {item['masalah']}",
     })
     _hapus_review(book, kunci)
