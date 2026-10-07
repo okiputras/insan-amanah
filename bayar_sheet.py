@@ -143,13 +143,6 @@ def baca_review(book):
             for d in rows]
 
 
-def kunci_terpakai(book):
-    """Semua KUNCI di PEMBAYARAN & PERLU DICEK — dipakai impor supaya bisa diulang
-    tanpa menggandakan uang."""
-    return ({p["kunci"] for p in baca_pembayaran(book) if p["kunci"]}
-            | {r["kunci"] for r in baca_review(book) if r["kunci"]})
-
-
 # ---------------------------------------------------------------- tulis
 def _baris_bayar(p):
     return [p["tanggal"], str(p["induk"]), p.get("nama", ""), int(p.get("bpp") or 0),
@@ -175,6 +168,37 @@ def tambah_review(book, daftar):
             [[r["tanggal"], r["nama"], str(r.get("induk_tercatat") or ""), int(r["bpp"]),
               int(r["katering"]), int(r["kegiatan"]), int(r["tabungan"]), r["masalah"],
               str(r.get("saran") or ""), r["kunci"]] for r in daftar],
+            value_input_option="RAW")
+
+
+NOMINAL = ("BPP", "KATERING", "KEGIATAN", "TABUNGAN")
+
+
+def nominal_per_kunci(book):
+    """-> {KUNCI: (tab, nomor baris, [bpp, katering, kegiatan, tabungan])} dari PEMBAYARAN
+    dan PERLU DICEK. Dipakai impor untuk melewati baris yang sudah ada dan untuk
+    membandingkan nominalnya dengan file sumber."""
+    out = {}
+    for title in (C.TAB_BAYAR, C.TAB_REVIEW):
+        _, rows = _baca(book, title)
+        for d in rows:
+            k = str(d.get("KUNCI", "")).strip()
+            if k:
+                out[k] = (title, d["_row"], [_uang(d.get(h)) for h in NOMINAL])
+    return out
+
+
+def koreksi_nominal(book, title, daftar):
+    """Timpa kolom BPP..TABUNGAN pada baris-baris tertentu. daftar: [(nomor baris, [4 angka])].
+    Satu-satunya tempat buku besar diubah selain ditambah — hanya untuk membetulkan baris
+    impor yang terbaca salah dari sumbernya."""
+    header = _HEADER[title]
+    c0 = header.index(NOMINAL[0])
+    assert tuple(header[c0:c0 + 4]) == NOMINAL, header
+    a, b = gspread.utils.rowcol_to_a1(1, c0 + 1)[:-1], gspread.utils.rowcol_to_a1(1, c0 + 4)[:-1]
+    if daftar:
+        book.worksheet(title).batch_update(
+            [{"range": f"{a}{r}:{b}{r}", "values": [list(map(int, v))]} for r, v in daftar],
             value_input_option="RAW")
 
 

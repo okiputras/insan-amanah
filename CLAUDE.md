@@ -181,7 +181,14 @@ and is corrected to 200.000 in the data at import, not in code.
 
 `bayar_import.py data-alarm` (run `--dry-run` first) reads the school's monthly
 workbooks, whose `PEMASUKAN BPP` tab is a row of side-by-side blocks, one per receipt
-date, in an 8- or 9-column variant. July rows mostly lack INDUK, so students are matched
+date, in an 8- or 9-column variant. The variant is told apart by where the TOTAL header
+sits (`_lebar9`), not by the doubled "BPP" header — that header was blank in one block,
+which shifted every amount one column over. In the 9-column variant BPP is derived as
+combined − katering rather than read, because the "BPP" column is a formula that
+sometimes hardcodes the wrong constant. Each run also compares every already-imported
+row with its source cell by `KUNCI` and lists differences; `--perbaiki` overwrites them
+(`bayar_sheet.koreksi_nominal`, the only in-place edit the ledger ever gets).
+July rows mostly lack INDUK, so students are matched
 by name (`cocokkan_nama`: initials, truncated words, near-spellings; refuses to guess
 when ambiguous — measured 99.5% correct on 1,239 rows whose INDUK was known). It also
 distrusts a written INDUK whose name plainly belongs to someone else, which is how it

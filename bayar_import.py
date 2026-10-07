@@ -5,6 +5,7 @@ Skrip admin: impor master siswa & data pemasukan BPP dari Excel sekolah ke sprea
     python3 bayar_import.py data-alarm --dry-run      # cek dulu, tanpa menulis
     python3 bayar_import.py data-alarm                # tulis ke Google Sheet
     python3 bayar_import.py data-alarm --isi-ulang-siswa   # timpa tab SISWA dari master
+    python3 bayar_import.py data-alarm --perbaiki     # samakan nominal baris lama dengan sumber
 
 Folder berisi:
   TEMPLATE NOMINAL BPP DAN KEGIATAN SDIA <T.A.>.xlsx  -> master (sheet KELAS 1..6, tiap
@@ -17,7 +18,8 @@ Baris 3: label tanggal di kolom pertama blok, "NAMA" di kolom kedua, nama bulan 
 kolom ketiga. Baris 4: sub-header. Dua format blok:
   8 kolom: INDUK | NAMA | BPP | KATERING | KEG | TABUNGAN | TOTAL
   9 kolom: INDUK | NAMA | BPP+KATERING | BPP | KATERING | KEG | TABUNGAN | TOTAL
-           (sub-header "BPP" muncul dua kali; yang pertama adalah gabungan)
+           (kolom "BPP" pertama adalah gabungan; judul "BPP" kedua kadang kosong, jadi
+           format dibedakan dari posisi judul TOTAL — lihat _lebar9)
 Blok kosong (sisa templat) dilewati. INDUK kadang angka, kadang teks, dan di file Juli
 sebagian besar kosong — di situ siswa dicocokkan lewat nama.
 
@@ -111,6 +113,17 @@ def _tanggal(label, bulan, tahun):
     return akhir.isoformat()
 
 
+def _lebar9(ws, c):
+    """Blok format 9 kolom? Ditentukan dari POSISI judul TOTAL di baris 4 (kolom ke-8 blok
+    = 9 kolom, ke-7 = 8 kolom). Jangan dari teks "BPP" ganda: di blok 8 Agustus judul BPP
+    kedua kosong, sehingga blok itu terbaca 8 kolom dan semua nominal bergeser satu kolom
+    (BPP+katering terhitung dua kali, kegiatan masuk ke tabungan)."""
+    for k in (7, 6):
+        if str(ws.cell(4, c + k).value or "").strip().upper().startswith("TOTAL"):
+            return k == 7
+    return [str(ws.cell(4, c + k).value or "").strip().upper() for k in (2, 3)] == ["BPP", "BPP"]
+
+
 def baca_pembayaran(path):
     """-> (baris pembayaran, info blok untuk rekonsiliasi)."""
     bulan, tahun, label_file = _bulan_file(path)
@@ -119,22 +132,31 @@ def baca_pembayaran(path):
             if str(ws.cell(3, c + 1).value or "").strip().upper() == "NAMA"]
     rows, info = [], []
     for c in blok:
-        sub = [str(ws.cell(4, c + k).value or "").strip().upper() for k in range(2, 8)]
-        lebar9 = sub[0] == "BPP" and sub[1] == "BPP"
+        lebar9 = _lebar9(ws, c)
         label = ws.cell(3, c).value
         tanggal = _tanggal(label, bulan, tahun)
         label_txt = label.date().isoformat() if isinstance(label, dt.datetime) else str(label or "").strip()
         terakhir = None
         jumlah_bpp = 0
+        janggal = []
         for r in range(5, ws.max_row + 1):
             nama = ws.cell(r, c + 1).value
             if nama in (None, ""):
                 continue
             v = [ws.cell(r, c + k).value for k in range(8)]
             if lebar9:
-                bpp, kat, keg, tab = _uang(v[3]), _uang(v[4]), _uang(v[5]), _uang(v[6])
+                gabung, kat, keg, tab = _uang(v[2]), _uang(v[4]), _uang(v[5]), _uang(v[6])
+                # BPP diturunkan dari kolom gabungan (diketik dari nominal bayar), bukan dibaca
+                # dari kolom "BPP": kolom itu rumus yang kadang memakai konstanta salah
+                # (=900000-katering untuk siswa bertagihan 855.000). TOTAL juga tidak dipakai:
+                # di blok 6 September rumus TOTAL sekolah ikut menjumlah kolom gabungan.
+                bpp = gabung - kat if gabung else _uang(v[3])
+                if _uang(v[3]) != bpp:
+                    janggal.append(r)
             else:
                 bpp, kat, keg, tab = _uang(v[2]), _uang(v[3]), _uang(v[4]), _uang(v[5])
+                if _uang(v[6]) != bpp + kat + keg + tab:
+                    janggal.append(r)
             terakhir = r
             jumlah_bpp += bpp
             rows.append({"tanggal": tanggal, "induk": _induk(v[0]), "nama": str(nama).strip(),
@@ -147,8 +169,8 @@ def baca_pembayaran(path):
         footer = next((ws.cell(r, kol_bpp).value for r in range(terakhir + 1, terakhir + 4)
                        if isinstance(ws.cell(r, kol_bpp).value, (int, float))
                        and ws.cell(r, c + 1).value in (None, "")), None)
-        info.append({"blok": get_column_letter(c), "label": label_txt,
-                     "jumlah": jumlah_bpp, "footer": footer})
+        info.append({"blok": get_column_letter(c), "label": label_txt, "lebar9": lebar9,
+                     "jumlah": jumlah_bpp, "footer": footer, "janggal": janggal})
     return label_file, rows, info
 
 
@@ -257,6 +279,7 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     dry = "--dry-run" in sys.argv
     isi_ulang = "--isi-ulang-siswa" in sys.argv
+    perbaiki = "--perbaiki" in sys.argv
     if not args:
         print(__doc__)
         sys.exit(1)
@@ -276,7 +299,7 @@ def main():
     print(f"Master: {len(daftar_siswa)} siswa, {n_pindah} PINDAH, {n_kor} katering dikoreksi 220.000 -> 200.000")
 
     book = None
-    terpakai = set()
+    terpakai = {}
     if not dry and not C.SPREADSHEET_ID:
         print("SPREADSHEET_ID belum diisi di bayar_config.py.")
         sys.exit(1)
@@ -287,18 +310,22 @@ def main():
         if not dry:                        # dry-run tidak boleh menulis apa pun, termasuk membuat tab
             S.siapkan_tab(book)
         try:
-            terpakai = S.kunci_terpakai(book)
+            terpakai = S.nominal_per_kunci(book)
         except gspread.exceptions.WorksheetNotFound:
-            terpakai = set()               # dry-run sebelum impor pertama: tab belum ada
+            terpakai = {}                  # dry-run sebelum impor pertama: tab belum ada
         print("Terhubung:", book.title, "| baris yang sudah ada:", len(terpakai))
 
-    masuk, review, blok_beda = [], [], []
+    masuk, review, blok_beda, blok_janggal, beda = [], [], [], [], []
     for path in bayar_paths:
         label_file, rows, info = baca_pembayaran(path)
         n_induk = n_nama = n_rev = n_lewat = 0
         for p in rows:
             if p["kunci"] in terpakai:
                 n_lewat += 1
+                tab, baris, lama = terpakai[p["kunci"]]
+                baru = [p["bpp"], p["katering"], p["kegiatan"], p["tabungan"]]
+                if lama != baru:
+                    beda.append((tab, baris, p, lama, baru))
                 continue
             induk, masalah, saran, cara = tentukan_siswa(p, siswa, siswa_norm)
             if masalah:
@@ -320,6 +347,8 @@ def main():
         for b in info:
             if b["footer"] is not None and abs(b["footer"] - b["jumlah"]) >= 1:
                 blok_beda.append((label_file, b))
+            if b["janggal"]:
+                blok_janggal.append((label_file, b))
         print(f"  {label_file:<15} {len(rows):>4} baris | via INDUK {n_induk:>4} | via nama {n_nama:>4} "
               f"| perlu dicek {n_rev:>2}" + (f" | sudah ada {n_lewat}" if n_lewat else ""))
 
@@ -337,6 +366,22 @@ def main():
             print(f"   - {label_file} blok {b['blok']} ({b['label']}): jumlah baris BPP "
                   f"{_rp(b['jumlah'])} vs footer {_rp(b['footer'])} (selisih {_rp(b['jumlah'] - b['footer'])})")
 
+    if blok_janggal:
+        print("\nBaris yang tidak konsisten di dalam bloknya sendiri (cek manual di Excel sekolah):")
+        for label_file, b in blok_janggal:
+            print(f"   - {label_file} blok {b['blok']} ({b['label']}, {'9' if b['lebar9'] else '8'} kolom): "
+                  f"baris {', '.join(map(str, b['janggal'][:10]))}")
+
+    if beda:
+        print(f"\nNominal di Sheet BERBEDA dari file sumber: {len(beda)} baris "
+              f"(BPP / katering / kegiatan / tabungan, Sheet -> sumber)")
+        for tab, baris, p, lama, baru in beda:
+            print(f"   - {p['kunci']:<22} {tab} baris {baris:<5} {p['nama'][:24]:<24} "
+                  f"{'/'.join(_rp(x) for x in lama)} -> {'/'.join(_rp(x) for x in baru)}")
+        if not perbaiki:
+            print("   Jalankan dengan --perbaiki untuk menyamakan dengan sumber (baris yang sengaja"
+                  " dikoreksi manual di Sheet ikut tertimpa — periksa daftar di atas dulu).")
+
     if dry:
         print("\n(dry-run: tidak ada yang ditulis)")
         return
@@ -347,6 +392,10 @@ def main():
     S.catat_banyak(book, masuk)
     S.tambah_review(book, review)
     print(f"Ditulis: {len(masuk)} pembayaran, {len(review)} baris Perlu Dicek")
+    if perbaiki and beda:
+        for tab in (C.TAB_BAYAR, C.TAB_REVIEW):
+            S.koreksi_nominal(book, tab, [(baris, baru) for t, baris, _, _, baru in beda if t == tab])
+        print(f"Dikoreksi: {len(beda)} baris disamakan dengan sumber")
     print("Selesai:", f"https://docs.google.com/spreadsheets/d/{C.SPREADSHEET_ID}")
 
 
