@@ -12,7 +12,7 @@ import time
 import zipfile
 import secrets
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import (
     Flask, request, render_template_string, send_file, abort, redirect, url_for,
@@ -42,6 +42,15 @@ try:
 except Exception as _e:            # noqa
     LK = LSheet = None
     _LK_IMPORT_ERR = str(_e)
+
+# Menu Pembayaran SD (cek tunggakan BPP + katering + kegiatan). Sama pola soft-import.
+try:
+    import bayar_config as BYR
+    import bayar_sheet as BSheet
+    _BYR_IMPORT_ERR = None
+except Exception as _e:            # noqa
+    BYR = BSheet = None
+    _BYR_IMPORT_ERR = str(_e)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024   # batas total 1x upload: 40 MB
@@ -677,6 +686,187 @@ def laporan_keuangan_bulan_baru():
     return _lk_bulan_baru()
 
 
+# ---------------------------------------------------------------- Pembayaran SD
+def _bayar_ctx(cek=False, per=None, rombel="", msg=None, msgtype="info"):
+    """Konteks halaman Pembayaran SD. Status lunas tidak disimpan di mana pun — dihitung
+    ulang dari buku besar setiap kali (lihat bayar_config)."""
+    ctx = {"active": "bayar_sd", "error": None, "msg": msg, "msgtype": msgtype,
+           "sa_email": TC.SERVICE_ACCOUNT_EMAIL if TC else "",
+           "sheet_url": (f"https://docs.google.com/spreadsheets/d/{BYR.SPREADSHEET_ID}"
+                         if BYR and BYR.SPREADSHEET_ID else "#"),
+           "bulan_opsi": [], "rombel_opsi": [], "per": per, "rombel": rombel or "",
+           "label_per": "", "hasil": None, "token": None, "review": [], "roster": [],
+           "roster_json": "{}", "today": "", "total_menunggak": "", "nonce": secrets.token_hex(8)}
+    if BSheet is None:
+        ctx["error"] = "Modul Pembayaran belum siap: " + (_BYR_IMPORT_ERR or "gspread belum terpasang.")
+        return ctx
+    if not BYR.SPREADSHEET_ID:
+        ctx["error"] = ("SPREADSHEET_ID belum diisi di bayar_config.py. Buat spreadsheet "
+                        f"\"{BYR.SPREADSHEET_TITLE}\", share ke service account, lalu jalankan bayar_import.py.")
+        return ctx
+    try:
+        book = BSheet.open_book()
+        siswa = BSheet.baca_siswa(book)
+        review = BSheet.baca_review(book)
+    except Exception as e:  # noqa (PermissionError / tab belum ada / kredensial)
+        ctx["error"] = str(e)
+        return ctx
+    if not siswa:
+        ctx["error"] = f"Tab {BYR.TAB_SISWA} masih kosong. Jalankan bayar_import.py dulu."
+        return ctx
+
+    sekarang = BYR.bulan_ini()
+    per = per if per in BYR.bulan_list() else sekarang
+    ctx.update(
+        per=per, label_per=BYR.label_bulan(per),
+        bulan_opsi=[(b, BYR.label_bulan(b)) for b in BYR.bulan_list()[: BYR.bulan_list().index(sekarang) + 1]],
+        rombel_opsi=sorted({s["rombel"] for s in siswa.values() if s["rombel"]}),
+        review=review,
+        roster=sorted(siswa.values(), key=lambda s: (s["rombel"], s["nama"])),
+        roster_json=json.dumps({k: {"nama": s["nama"], "rombel": s["rombel"], "bpp": s["bpp"],
+                                    "katering": s["katering"], "kegiatan": s["kegiatan"],
+                                    "status": s["status"]} for k, s in siswa.items()}),
+        today=(datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d"),
+    )
+    if cek:
+        totals = BYR.total_per_siswa(BSheet.baca_pembayaran(book))
+        hasil = BYR.cek(siswa, totals, per, rombel or None)
+        for r in hasil["menunggak"] + hasil["bulan_ini"]:
+            r["kurang_str"] = ribuan(r["kurang"])
+            r["tagihan_str"] = ribuan(r["tagihan_bulan_ini"])
+        ctx["hasil"] = hasil
+        ctx["total_menunggak"] = rupiah(sum(r["kurang"] for r in hasil["menunggak"]))
+        ctx["token"] = _store({"tunggakan": (
+            f"Tunggakan_SD_per_{BYR.label_bulan(per).replace(' ', '_')}"
+            f"{'_' + rombel if rombel else ''}.xlsx",
+            wb_to_bytes(_bayar_workbook(hasil, per, rombel)))})
+    return ctx
+
+
+def _bayar_workbook(hasil, per, rombel):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    hf = PatternFill("solid", fgColor="1F4E5F")
+    hfont = Font(bold=True, color="FFFFFF")
+    judul = f"per {BYR.label_bulan(per)}" + (f" — rombel {rombel}" if rombel else "")
+    lembar = [
+        ("Menunggak", f"SISWA MENUNGGAK {judul}",
+         ["No", "Induk", "Nama", "Rombel", "Bulan belum lunas", "Kurang (Rp)", "Pernah bayar"],
+         [[r["induk"], r["nama"], r["rombel"], r["rincian"], r["kurang"],
+           "ya" if r["pernah_bayar"] else "BELUM SAMA SEKALI"] for r in hasil["menunggak"]]),
+        ("Belum bayar bulan ini", f"BELUM BAYAR {BYR.label_bulan(per).upper()}",
+         ["No", "Induk", "Nama", "Rombel", "Tagihan bulan ini (Rp)"],
+         [[r["induk"], r["nama"], r["rombel"], r["tagihan_bulan_ini"]] for r in hasil["bulan_ini"]]),
+    ]
+    for i, (nama, title, header, rows) in enumerate(lembar):
+        ws = wb.active if i == 0 else wb.create_sheet()
+        ws.title = nama
+        ws["A1"] = title
+        ws["A1"].font = Font(bold=True, size=13, color="1F4E5F")
+        for c, h in enumerate(header, 1):
+            cell = ws.cell(3, c, h)
+            cell.fill, cell.font = hf, hfont
+        for n, row in enumerate(rows, 1):
+            for c, v in enumerate([n] + row, 1):
+                cell = ws.cell(3 + n, c, v)
+                if isinstance(v, int) and c > 1:
+                    cell.number_format = "#,##0"
+        for col, w in zip("ABCDEFG", [5, 8, 34, 8, 46, 14, 18]):
+            ws.column_dimensions[col].width = w
+        ws.freeze_panes = "A4"
+    return wb
+
+
+def _bayar_redirect(msg, t, **q):
+    q = {k: v for k, v in q.items() if v}
+    return redirect(url_for("pembayaran", msg=msg, t=t, **q), code=303)
+
+
+@app.route("/pembayaran")
+def pembayaran():
+    return render_template_string(BAYAR_PAGE, **_bayar_ctx(
+        cek=request.args.get("cek") == "1", per=request.args.get("per", type=int),
+        rombel=(request.args.get("rombel") or "").strip().upper(),
+        msg=request.args.get("msg"), msgtype=request.args.get("t", "info")))
+
+
+@app.route("/pembayaran/simpan", methods=["POST"])
+def pembayaran_simpan():
+    f = request.form
+    balik = {"cek": f.get("cek"), "per": f.get("per"), "rombel": f.get("rombel")}
+    try:
+        if BSheet is None or not BYR.SPREADSHEET_ID:
+            raise RuntimeError("Modul Pembayaran belum siap.")
+        induk = (f.get("induk") or "").strip()
+        nominal = {k: f.get(k, type=int) or 0 for k in ("bpp", "katering", "kegiatan", "tabungan")}
+        if any(v < 0 for v in nominal.values()):
+            raise ValueError("Nominal tidak boleh negatif.")
+        if not any(nominal.values()):
+            raise ValueError("Isi minimal satu nominal pembayaran.")
+        book = BSheet.open_book()
+        siswa = BSheet.baca_siswa(book)
+        if induk not in siswa:
+            raise ValueError(f"No Induk '{induk}' tidak ada di tab {BYR.TAB_SISWA}.")
+        kunci = "app:" + (f.get("nonce") or secrets.token_hex(8))
+        lama = BSheet.baca_pembayaran(book)
+        if any(p["kunci"] == kunci for p in lama):
+            # Formulir yang sama terkirim dua kali (klik ganda / muat ulang). Buku besar
+            # hanya ditambah, jadi tanpa ini uangnya tercatat dua kali.
+            raise ValueError("Pembayaran ini sudah tercatat (formulir terkirim dua kali).")
+        tanggal = f.get("tanggal") or (datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d")
+        s = siswa[induk]
+        BSheet.catat_pembayaran(book, {"tanggal": tanggal, "induk": induk, "nama": s["nama"],
+                                       **nominal, "sumber": "aplikasi", "kunci": kunci,
+                                       "catatan": (f.get("catatan") or "").strip()})
+        tot = BYR.total_per_siswa(lama + [{"induk": induk, **nominal}]).get(induk, {})
+        sampai = BYR.bulan_lunas(s, tot)
+        bayar = rupiah(nominal["bpp"] + nominal["katering"] + nominal["kegiatan"] + nominal["tabungan"])
+        status = ("Juli pun belum lunas." if sampai is None
+                  else f"Kini lunas berturut-turut s/d {BYR.label_bulan(sampai)}.")
+        sisa = [x for x in BYR.status_siswa(s, tot, BYR.bulan_ini()) if x[1]]
+        if sisa:
+            status += " Masih kurang: " + BYR.ringkas_kurang(sisa) + "."
+        return _bayar_redirect(f"✓ {bayar} untuk {s['nama']} ({s['rombel']}) tercatat. {status}", "ok", **balik)
+    except Exception as e:  # noqa
+        return _bayar_redirect(str(e), "err", **balik)
+
+
+@app.route("/pembayaran/review/simpan", methods=["POST"])
+def pembayaran_review_simpan():
+    try:
+        if BSheet is None or not BYR.SPREADSHEET_ID:
+            raise RuntimeError("Modul Pembayaran belum siap.")
+        kunci = request.form.get("kunci", "")
+        induk = (request.form.get("induk") or "").strip()
+        book = BSheet.open_book()
+        siswa = BSheet.baca_siswa(book)
+        if induk not in siswa:
+            raise ValueError(f"No Induk '{induk}' tidak ada di tab {BYR.TAB_SISWA}.")
+        item = BSheet.selesaikan_review(book, kunci, induk, siswa[induk]["nama"])
+        return _bayar_redirect(f"✓ Pembayaran '{item['nama']}' dicatat atas nama "
+                               f"{siswa[induk]['nama']} ({induk}).", "ok")
+    except Exception as e:  # noqa
+        return _bayar_redirect(str(e), "err")
+
+
+@app.route("/pembayaran/review/abaikan", methods=["POST"])
+def pembayaran_review_abaikan():
+    try:
+        if BSheet is None or not BYR.SPREADSHEET_ID:
+            raise RuntimeError("Modul Pembayaran belum siap.")
+        BSheet.abaikan_review(BSheet.open_book(), request.form.get("kunci", ""))
+        return _bayar_redirect("✓ Baris diabaikan (tidak dicatat sebagai pembayaran).", "ok")
+    except Exception as e:  # noqa
+        return _bayar_redirect(str(e), "err")
+
+
+@app.route("/dl/<token>/tunggakan")
+def dl_tunggakan(token):
+    entry = _get(token)
+    return _send(entry.get("tunggakan") if entry else None)
+
+
 @app.route("/health")
 def health():
     return "ok", 200
@@ -772,6 +962,7 @@ PAGE = """<!doctype html>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
     <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+    <a href="{{ url_for('pembayaran') }}" class="{{ 'active' if active=='bayar_sd' else '' }}">Pembayaran SD</a>
   </div>
   <h1>&#128202; Konverter Laporan R-5401 &rarr; Excel</h1>
   <p class="sub">Upload file laporan transaksi harian (.txt format lebar-tetap dari bank).
@@ -896,6 +1087,7 @@ REKAP_PAGE = """<!doctype html>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
     <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+    <a href="{{ url_for('pembayaran') }}" class="{{ 'active' if active=='bayar_sd' else '' }}">Pembayaran SD</a>
   </div>
   <h1>&#128203; Data Validasi {{ cfg.nama }}</h1>
   <p class="sub">Upload <strong>master siswa {{ cfg.nama }}</strong> (.xlsx, 5 kolom berurutan:
@@ -1014,6 +1206,7 @@ TABUNGAN_PAGE = """<!doctype html>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
     <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+    <a href="{{ url_for('pembayaran') }}" class="{{ 'active' if active=='bayar_sd' else '' }}">Pembayaran SD</a>
   </div>
   <h1>&#127974; {{ label }} Insan Amanah</h1>
   <p class="sub">Catat penyetoran/penarikan tabungan siswa langsung ke Google Sheet.
@@ -1178,6 +1371,7 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
     <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
     <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
     <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+    <a href="{{ url_for('pembayaran') }}" class="{{ 'active' if active=='bayar_sd' else '' }}">Pembayaran SD</a>
   </div>
   <h1>&#128176; Laporan Keuangan SD Insan Amanah</h1>
   <p class="sub">Rincian Program &rarr; Sub Program &rarr; Kegiatan &rarr; Rincian, tersimpan
@@ -1363,6 +1557,272 @@ LAPORAN_KEUANGAN_PAGE = """<!doctype html>
     var uc = parseFloat(document.getElementById('f_unit_cost').value) || 0;
     var totalEl = document.getElementById('f_total');
     if (!totalEl.value && vol && uc) totalEl.value = Math.round(vol*uc);
+  }
+</script>
+</body>
+</html>"""
+
+
+BAYAR_EXTRA = """
+  .bayar-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  @media (max-width:760px){ .bayar-grid{ grid-template-columns:repeat(2,1fr); } }
+  .bayar-grid .field { margin:0; }
+  .kecil { font-size:.82rem; color:#6b7a80; }
+  .tag-nol { display:inline-block; padding:1px 7px; border-radius:6px; background:#fde8e8;
+             color:#b3261e; font-size:.75rem; font-weight:700; margin-left:6px; }
+  table.data td.aksi { white-space:nowrap; }
+  table.data td.aksi a, table.data td.aksi button { cursor:pointer; font-size:.85rem; }
+  .rev-form { display:flex; gap:6px; align-items:center; }
+  .rev-form .in { width:92px; padding:6px 8px; }
+  .rev-form button { padding:6px 10px; border-radius:7px; border:0; cursor:pointer; font-size:.82rem; }
+  .rev-ok { background:var(--teal); color:#fff; }
+  .rev-no { background:#eef3f5; color:#b3261e; }
+"""
+
+BAYAR_PAGE = """<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pembayaran SD Insan Amanah</title>
+<style>""" + STYLE + TAB_EXTRA + BAYAR_EXTRA + """</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav">
+    <a href="{{ url_for('index') }}" class="{{ 'active' if active=='convert' else '' }}">Konversi R-5401</a>
+    <a href="{{ url_for('validasi', level='sd') }}" class="{{ 'active' if active=='validasi_sd' else '' }}">Data Validasi SD</a>
+    <a href="{{ url_for('validasi', level='smp') }}" class="{{ 'active' if active=='validasi_smp' else '' }}">Data Validasi SMP</a>
+    <a href="{{ url_for('tabungan') }}" class="{{ 'active' if active=='tab_smp' else '' }}">Tabungan SMP</a>
+    <a href="{{ url_for('tabungan_sd') }}" class="{{ 'active' if active=='tab_sd' else '' }}">Tabungan SD</a>
+    <a href="{{ url_for('laporan_keuangan') }}" class="{{ 'active' if active=='lk_sd' else '' }}">Laporan Keuangan SD</a>
+    <a href="{{ url_for('pembayaran') }}" class="{{ 'active' if active=='bayar_sd' else '' }}">Pembayaran SD</a>
+  </div>
+  <h1>&#128179; Pembayaran SD Insan Amanah</h1>
+  <p class="sub">Cek siswa yang belum melunasi <strong>BPP + katering + kegiatan</strong> sejak Juli,
+     dan catat pembayaran baru. Pembayaran beberapa bulan sekaligus otomatis dihitung
+     menutup bulan tertua lebih dulu.</p>
+
+  {% if msg %}<div class="alert {{ msgtype }}" style="margin-bottom:16px;">{{ msg }}</div>{% endif %}
+
+  {% if error %}
+    <div class="alert err">&#9888; {{ error }}</div>
+    {% if sa_email and 'share' in error|lower %}
+      <p class="hint">Bagikan spreadsheet ke <strong>{{ sa_email }}</strong> sebagai <strong>Editor</strong>.</p>
+    {% endif %}
+  {% else %}
+
+  <form class="filterbar" method="get" action="{{ url_for('pembayaran') }}">
+    <input type="hidden" name="cek" value="1">
+    <div class="fld">
+      <label class="lbl">Per bulan</label>
+      <select class="in" name="per">
+        {% for b, lab in bulan_opsi %}<option value="{{ b }}" {{ 'selected' if b==per else '' }}>{{ lab }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="fld">
+      <label class="lbl">Rombel</label>
+      <select class="in" name="rombel">
+        <option value="">Semua</option>
+        {% for r in rombel_opsi %}<option value="{{ r }}" {{ 'selected' if r==rombel else '' }}>{{ r }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="fld"><button class="btn primary" type="submit" style="margin:0;">&#128269; Cek siapa yang belum bayar</button></div>
+    <div class="fld"><a class="btn ghost" href="{{ sheet_url }}" target="_blank" rel="noopener">&#128196; Buka Google Sheet</a></div>
+  </form>
+
+  {% if hasil %}
+  <div class="metrics">
+    <div class="metric"><div class="k">Menunggak</div><div class="v">{{ hasil.menunggak|length }}</div></div>
+    <div class="metric"><div class="k">Total tunggakan</div><div class="v">{{ total_menunggak }}</div></div>
+    <div class="metric"><div class="k">Belum bayar {{ label_per }}</div><div class="v">{{ hasil.bulan_ini|length }}</div></div>
+    <div class="metric"><div class="k">Lunas s/d {{ label_per }}</div><div class="v">{{ hasil.jumlah_lunas }}</div></div>
+  </div>
+
+  <div class="combined">
+    <h2>&#9888; Menunggak ({{ hasil.menunggak|length }})</h2>
+    <p class="sub" style="margin:0 0 10px;">Masih ada bulan sebelum {{ label_per }} yang belum lunas.
+       Diurutkan dari kekurangan terbesar.{% if hasil.jumlah_pindah %} {{ hasil.jumlah_pindah }} siswa berstatus PINDAH tidak dihitung.{% endif %}</p>
+    {% if hasil.menunggak %}
+    <input class="search" placeholder="&#128269; Cari induk / nama…" onkeyup="cari(this, 'tMenunggak')">
+    <div class="tblwrap" style="max-height:520px; overflow:auto;">
+      <table class="data" id="tMenunggak">
+        <thead><tr><th>Induk</th><th>Nama</th><th>Rombel</th><th>Bulan belum lunas</th><th class="num">Kurang (Rp)</th><th></th></tr></thead>
+        <tbody>
+          {% for r in hasil.menunggak %}
+          <tr>
+            <td>{{ r.induk }}</td>
+            <td>{{ r.nama }}{% if not r.pernah_bayar %}<span class="tag-nol">belum pernah bayar</span>{% endif %}</td>
+            <td>{{ r.rombel }}</td><td>{{ r.rincian }}</td><td class="num">{{ r.kurang_str }}</td>
+            <td class="aksi"><a onclick="catat('{{ r.induk }}')">Catat bayar</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}<p class="hint">Tidak ada yang menunggak. &#127881;</p>{% endif %}
+  </div>
+
+  <div class="combined">
+    <h2>&#128336; Belum bayar {{ label_per }} ({{ hasil.bulan_ini|length }})</h2>
+    <p class="sub" style="margin:0 0 10px;">Bulan-bulan sebelumnya sudah lunas; tinggal {{ label_per }}.</p>
+    {% if hasil.bulan_ini %}
+    <input class="search" placeholder="&#128269; Cari induk / nama…" onkeyup="cari(this, 'tBulanIni')">
+    <div class="tblwrap" style="max-height:420px; overflow:auto;">
+      <table class="data" id="tBulanIni">
+        <thead><tr><th>Induk</th><th>Nama</th><th>Rombel</th><th class="num">Tagihan (Rp)</th><th></th></tr></thead>
+        <tbody>
+          {% for r in hasil.bulan_ini %}
+          <tr><td>{{ r.induk }}</td><td>{{ r.nama }}</td><td>{{ r.rombel }}</td>
+              <td class="num">{{ r.tagihan_str }}</td>
+              <td class="aksi"><a onclick="catat('{{ r.induk }}')">Catat bayar</a></td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}<p class="hint">Semua sudah bayar {{ label_per }}.</p>{% endif %}
+    <a class="btn dl" href="{{ url_for('dl_tunggakan', token=token) }}">&#11015; Unduh Excel daftar ini</a>
+  </div>
+  {% endif %}
+
+  <div class="combined" id="formCatat">
+    <h2>&#9997; Catat pembayaran</h2>
+    <form method="post" action="{{ url_for('pembayaran_simpan') }}" onsubmit="return kirim(this);">
+      <input type="hidden" name="nonce" value="{{ nonce }}">
+      <input type="hidden" name="cek" value="{{ '1' if hasil else '' }}">
+      <input type="hidden" name="per" value="{{ per if hasil else '' }}">
+      <input type="hidden" name="rombel" value="{{ rombel if hasil else '' }}">
+      <div class="tab-grid">
+        <div>
+          <div class="field">
+            <label class="lbl" for="induk">No Induk (ketik / pilih)</label>
+            <input class="in" id="induk" name="induk" list="siswa" autocomplete="off" required
+                   placeholder="mis. 2681" oninput="isiSiswa()">
+            <datalist id="siswa">
+              {% for s in roster %}<option value="{{ s.induk }}">{{ s.nama }} — {{ s.rombel }}</option>{% endfor %}
+            </datalist>
+          </div>
+          <div class="field">
+            <label class="lbl" for="nama">Nama</label>
+            <input class="in" id="nama" readonly placeholder="otomatis dari No Induk">
+            <p class="hint" id="infoTagihan"></p>
+          </div>
+        </div>
+        <div>
+          <div class="field">
+            <label class="lbl" for="tanggal">Tanggal bayar</label>
+            <input class="in" type="date" id="tanggal" name="tanggal" value="{{ today }}">
+          </div>
+          <div class="field">
+            <label class="lbl" for="nbulan">Isi otomatis untuk</label>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input class="in" type="number" id="nbulan" min="1" max="12" value="1" style="width:90px;" oninput="isiNominal()">
+              <span class="kecil">bulan (nominal bisa diubah manual)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="bayar-grid" style="margin-top:6px;">
+        <div class="field"><label class="lbl" for="f_bpp">BPP</label>
+          <input class="in" type="number" min="0" step="1" id="f_bpp" name="bpp" value="0"></div>
+        <div class="field"><label class="lbl" for="f_kat">Katering</label>
+          <input class="in" type="number" min="0" step="1" id="f_kat" name="katering" value="0"></div>
+        <div class="field"><label class="lbl" for="f_keg">Kegiatan</label>
+          <input class="in" type="number" min="0" step="1" id="f_keg" name="kegiatan" value="0"></div>
+        <div class="field"><label class="lbl" for="f_tab">Tabungan <span class="kecil">(tidak dihitung tagihan)</span></label>
+          <input class="in" type="number" min="0" step="1" id="f_tab" name="tabungan" value="0"></div>
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label class="lbl" for="catatan">Catatan <span class="kecil">(opsional, mis. "transfer BCA")</span></label>
+        <input class="in" id="catatan" name="catatan">
+      </div>
+      <button class="btn primary" type="submit" id="btnSimpan">&#128190; Simpan pembayaran</button>
+    </form>
+  </div>
+
+  {% if review %}
+  <div class="combined">
+    <h2>&#128270; Perlu dicek ({{ review|length }})</h2>
+    <p class="sub" style="margin:0 0 10px;">Pembayaran hasil impor yang siswanya belum pasti — belum dihitung
+       di cek tunggakan. Pastikan No Induk-nya lalu <strong>Simpan</strong>, atau <strong>Abaikan</strong>
+       bila bukan pembayaran T.A. ini.</p>
+    <div class="tblwrap">
+      <table class="data">
+        <thead><tr><th>Tanggal</th><th>Tercatat sebagai</th><th class="num">BPP</th><th class="num">Katering</th>
+                   <th class="num">Kegiatan</th><th>Masalah</th><th>Simpan untuk induk</th></tr></thead>
+        <tbody>
+          {% for r in review %}
+          <tr>
+            <td>{{ r.tanggal }}</td>
+            <td>{{ r.nama }}{% if r.induk_tercatat %}<br><span class="kecil">induk {{ r.induk_tercatat }}</span>{% endif %}</td>
+            <td class="num">{{ '{:,}'.format(r.bpp).replace(',', '.') }}</td>
+            <td class="num">{{ '{:,}'.format(r.katering).replace(',', '.') }}</td>
+            <td class="num">{{ '{:,}'.format(r.kegiatan).replace(',', '.') }}</td>
+            <td class="kecil">{{ r.masalah }}</td>
+            <td>
+              <form class="rev-form" method="post" action="{{ url_for('pembayaran_review_simpan') }}"
+                    onsubmit="return confirm('Catat pembayaran ini untuk induk ' + this.induk.value + '?');">
+                <input type="hidden" name="kunci" value="{{ r.kunci }}">
+                <input class="in" name="induk" list="siswa" value="{{ r.saran }}" required>
+                <button class="rev-ok" type="submit">Simpan</button>
+              </form>
+              <form class="rev-form" method="post" action="{{ url_for('pembayaran_review_abaikan') }}" style="margin-top:4px;"
+                    onsubmit="return confirm('Abaikan baris ini? Uangnya tidak akan dihitung.');">
+                <input type="hidden" name="kunci" value="{{ r.kunci }}">
+                <button class="rev-no" type="submit">Abaikan</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% endif %}
+
+  <hr class="sep">
+  <p class="foot">Buku besar ada di Google Sheet (tab PEMBAYARAN, hanya ditambah). Koreksi
+     pembayaran yang salah dilakukan langsung di Sheet; status lunas selalu dihitung ulang dari situ.</p>
+</div>
+
+<script>
+  const SISWA = {{ roster_json|safe }};
+  function rp(n){ return (n||0).toLocaleString('id-ID'); }
+  function isiSiswa(){
+    var s = SISWA[document.getElementById('induk').value.trim()];
+    document.getElementById('nama').value = s ? (s.nama + ' — ' + s.rombel) : '';
+    document.getElementById('infoTagihan').textContent = s
+      ? ('Tagihan per bulan: BPP ' + rp(s.bpp) + ' + katering ' + rp(s.katering) + ' + kegiatan ' + rp(s.kegiatan)
+         + (s.status === 'PINDAH' ? ' — siswa ini berstatus PINDAH' : ''))
+      : '';
+    isiNominal();
+  }
+  function isiNominal(){
+    var s = SISWA[document.getElementById('induk').value.trim()];
+    if (!s) return;
+    var n = Math.max(1, parseInt(document.getElementById('nbulan').value || '1', 10));
+    document.getElementById('f_bpp').value = s.bpp * n;
+    document.getElementById('f_kat').value = s.katering * n;
+    document.getElementById('f_keg').value = s.kegiatan * n;
+  }
+  function catat(induk){
+    document.getElementById('induk').value = induk;
+    isiSiswa();
+    document.getElementById('formCatat').scrollIntoView({behavior: 'smooth'});
+  }
+  function kirim(form){
+    var b = document.getElementById('btnSimpan');
+    if (b.disabled) return false;            // cegah klik ganda -> pembayaran tercatat dua kali
+    b.disabled = true; b.textContent = 'Menyimpan…';
+    return true;
+  }
+  function cari(input, id){
+    var q = input.value.toLowerCase();
+    document.querySelectorAll('#' + id + ' tbody tr').forEach(function(tr){
+      tr.style.display = tr.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
+    });
   }
 </script>
 </body>

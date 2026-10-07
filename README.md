@@ -25,10 +25,17 @@ Aplikasi web dengan beberapa menu:
    1 tab per bulan. Setiap baris (level manapun) bisa ditambah, diedit, atau
    dihapus bebas — beda dengan Tabungan yang kolomnya tetap per bulan, di sini
    jumlah baris per kategori dinamis.
+6. **Pembayaran SD** — tombol **"Cek siapa yang belum bayar"** menampilkan siswa yang
+   belum melunasi BPP + katering + kegiatan sejak Juli sampai bulan yang dipilih,
+   dipisah menjadi *Menunggak* (bulan-bulan lalu) dan *Belum bayar bulan ini*, plus
+   unduh Excel. Pembayaran baru dicatat lewat aplikasi (isi nominal; pembayaran beberapa
+   bulan sekaligus otomatis menutup bulan tertua lebih dulu). Data Juli–September
+   diimpor sekali dari Excel pemasukan BPP sekolah dengan `bayar_import.py`.
 
-Menu 4 & 5 butuh kredensial Google service account (`sa-sheet.json` atau env
+Menu 4–6 butuh kredensial Google service account (`sa-sheet.json` atau env
 `GOOGLE_SERVICE_ACCOUNT_JSON`) yang sudah di-share sebagai Editor ke
-spreadsheet terkait — lihat komentar di `tab_config.py` / `lk_config.py`.
+spreadsheet terkait — lihat komentar di `tab_config.py` / `lk_config.py` /
+`bayar_config.py`.
 
 Dibangun **ringan** dengan Flask + openpyxl (tanpa numpy/pandas/pyarrow), memakai
 HTTP request/response biasa — hemat memori dan stabil di container kecil.
@@ -73,6 +80,9 @@ tab_build.py, tab_build_sd.py  # skrip admin sekali-jalan: isi Tabungan SMP/SD d
 lk_config.py      # konstanta & layout kolom menu Laporan Keuangan (outline dinamis)
 lk_sheet.py       # CRUD Google Sheets untuk Laporan Keuangan (insert/update/delete baris)
 lk_build.py       # skrip admin sekali-jalan: isi tab bulan pertama Laporan Keuangan
+bayar_config.py   # aturan tagihan & hitung tunggakan menu Pembayaran SD (murni, tanpa Sheets)
+bayar_sheet.py    # Google Sheets untuk Pembayaran SD (siswa, buku besar, Perlu Dicek)
+bayar_import.py   # skrip admin: impor master & Excel pemasukan BPP ke buku besar
 requirements.txt  # Flask, openpyxl, gunicorn, gspread, google-auth
 Procfile          # start command untuk platform berbasis Procfile
 railway.json      # start command untuk Railway
